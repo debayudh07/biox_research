@@ -69,12 +69,20 @@ export default function Home() {
           </div>
           <nav className="hidden md:flex items-center gap-6 text-sm">
             {connected && isSignedUp && (
-              <Link
-                href="/publishpaper"
-                className="text-emerald-600 hover:text-emerald-500 transition-colors dark:text-emerald-400 dark:hover:text-emerald-300 font-medium"
-              >
-                Publish Paper
-              </Link>
+              <>
+                <Link
+                  href="/publishpaper"
+                  className="text-emerald-600 hover:text-emerald-500 transition-colors dark:text-emerald-400 dark:hover:text-emerald-300 font-medium"
+                >
+                  Publish Paper
+                </Link>
+                <Link
+                  href="/profile"
+                  className="text-emerald-600 hover:text-emerald-500 transition-colors dark:text-emerald-400 dark:hover:text-emerald-300 font-medium"
+                >
+                  Profile
+                </Link>
+              </>
             )}
             <Link
               href="#features"
