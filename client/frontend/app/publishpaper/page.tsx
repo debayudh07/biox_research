@@ -33,12 +33,20 @@ import {
   Edit3,
   Upload,
   RefreshCw,
+  Brain,
+  Wand2,
+  Target,
+  TrendingUp,
+  Lightbulb,
+  Search,
+  Zap,
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Progress } from "@/components/ui/progress"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { GeminiAIService } from "@/lib/gemini"
 
 interface FormData {
   title: string
@@ -60,6 +68,35 @@ interface Paper {
 
 interface PublishingState {
   isLoading: boolean
+}
+
+// AI-related interfaces
+interface AIAnalysis {
+  suggestedTitle?: string
+  improvedAbstract?: string
+  keywords?: string[]
+  researchDomain?: string
+  estimatedFundingGoal?: number
+  suggestedFundingPeriod?: number
+  targetAudience?: string[]
+  innovationScore?: number
+  marketPotential?: string
+  risks?: string[]
+  suggestions?: string[]
+}
+
+interface AIAssistant {
+  isAnalyzing: boolean
+  isEnhancing: boolean
+  isGeneratingStrategy: boolean
+  isSuggestingCollaborators: boolean
+  showAnalysis: boolean
+  showStrategy: boolean
+  showCollaborators: boolean
+  analysis: AIAnalysis | null
+  strategy: any | null
+  collaborators: any | null
+  enhancedAbstract: any | null
 }
 
 export default function PublishPaperPage() {
@@ -88,6 +125,22 @@ export default function PublishPaperPage() {
   const [activeTab, setActiveTab] = useState("submit")
   const [fileName, setFileName] = useState<string | null>(null)
   const [formErrors, setFormErrors] = useState<Record<string, string>>({})
+
+  // AI state management
+  const [aiAssistant, setAiAssistant] = useState<AIAssistant>({
+    isAnalyzing: false,
+    isEnhancing: false,
+    isGeneratingStrategy: false,
+    isSuggestingCollaborators: false,
+    showAnalysis: false,
+    showStrategy: false,
+    showCollaborators: false,
+    analysis: null,
+    strategy: null,
+    collaborators: null,
+    enhancedAbstract: null,
+  })
+  const [autoCompleteSuggestions, setAutoCompleteSuggestions] = useState<any>(null)
 
   // Load draft papers when wallet connects
   useEffect(() => {
@@ -270,8 +323,7 @@ export default function PublishPaperPage() {
       setFormData((prev) => ({ ...prev, authors: newAuthors }))
     }
   }
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] || null
     if (file) {
       setFileName(file.name)
@@ -283,6 +335,42 @@ export default function PublishPaperPage() {
           delete newErrors.paperFile
           return newErrors
         })
+      }
+
+      // Try to analyze PDF content if it's a PDF file
+      if (file.type === 'application/pdf' && file.size < 5 * 1024 * 1024) { // Less than 5MB
+        try {
+          const reader = new FileReader()
+          reader.onload = async (event) => {
+            const text = event.target?.result as string
+            if (text && text.length > 100) {
+              try {
+                const analysis = await GeminiAIService.analyzePDFContent(text)
+                
+                // Auto-populate form fields if they're empty
+                if (analysis.extractedTitle && !formData.title) {
+                  setFormData(prev => ({ ...prev, title: analysis.extractedTitle! }))
+                }
+                if (analysis.extractedAbstract && !formData.abstract) {
+                  setFormData(prev => ({ ...prev, abstract: analysis.extractedAbstract! }))
+                }
+                if (analysis.extractedAuthors && analysis.extractedAuthors.length > 0 && formData.authors.length === 1 && !formData.authors[0]) {
+                  setFormData(prev => ({ ...prev, authors: analysis.extractedAuthors! }))
+                }
+
+                setSubmitStatus({
+                  type: "success",
+                  message: "PDF analyzed successfully! Form fields have been auto-populated.",
+                })
+              } catch (error) {
+                console.error("PDF analysis error:", error)
+              }
+            }
+          }
+          reader.readAsText(file)
+        } catch (error) {
+          console.error("PDF reading error:", error)
+        }
       }
     }
   }
@@ -406,12 +494,228 @@ export default function PublishPaperPage() {
       setSubmitStatus({
         type: "error",
         message: error instanceof Error ? error.message : "An unexpected error occurred",
-      })
-    } finally {
+      })    } finally {
       setIsSubmitting(false)
       setSubmitProgress(100)
     }
   }
+
+  // AI Functions
+  const analyzePaperWithAI = async () => {
+    if (!formData.title && !formData.abstract) {
+      setSubmitStatus({
+        type: "error",
+        message: "Please provide at least a title or abstract for AI analysis",
+      })
+      return
+    }
+
+    setAiAssistant(prev => ({ ...prev, isAnalyzing: true }))
+    
+    try {
+      const analysis = await GeminiAIService.analyzePaper({
+        title: formData.title,
+        abstract: formData.abstract,
+        authors: formData.authors.filter(author => author.trim()),
+        researchField: "Life Sciences"
+      })
+
+      setAiAssistant(prev => ({
+        ...prev,
+        analysis,
+        showAnalysis: true,
+        isAnalyzing: false
+      }))
+
+      // Auto-populate suggested values if fields are empty
+      if (!formData.fundingGoal && analysis.estimatedFundingGoal) {
+        setFormData(prev => ({
+          ...prev,
+          fundingGoal: analysis.estimatedFundingGoal!.toString()
+        }))
+      }
+
+      if (analysis.suggestedFundingPeriod) {
+        setFormData(prev => ({
+          ...prev,
+          fundingPeriodDays: analysis.suggestedFundingPeriod!.toString()
+        }))
+      }
+
+    } catch (error) {
+      console.error("AI Analysis error:", error)
+      setSubmitStatus({
+        type: "error",
+        message: "Failed to analyze paper with AI. Please try again.",
+      })
+      setAiAssistant(prev => ({ ...prev, isAnalyzing: false }))
+    }
+  }
+
+  const enhanceAbstractWithAI = async () => {
+    if (!formData.abstract.trim()) {
+      setSubmitStatus({
+        type: "error",
+        message: "Please provide an abstract to enhance",
+      })
+      return
+    }
+
+    setAiAssistant(prev => ({ ...prev, isEnhancing: true }))
+    
+    try {
+      const enhanced = await GeminiAIService.enhanceAbstract(formData.abstract, formData.title)
+      setAiAssistant(prev => ({
+        ...prev,
+        enhancedAbstract: enhanced,
+        isEnhancing: false
+      }))
+    } catch (error) {
+      console.error("AI Enhancement error:", error)
+      setSubmitStatus({
+        type: "error",
+        message: "Failed to enhance abstract with AI. Please try again.",
+      })
+      setAiAssistant(prev => ({ ...prev, isEnhancing: false }))
+    }
+  }
+
+  const generateFundingStrategy = async () => {
+    if (!formData.title || !formData.abstract || !formData.fundingGoal) {
+      setSubmitStatus({
+        type: "error",
+        message: "Please provide title, abstract, and funding goal for strategy generation",
+      })
+      return
+    }
+
+    setAiAssistant(prev => ({ ...prev, isGeneratingStrategy: true }))
+    
+    try {
+      const strategy = await GeminiAIService.generateFundingStrategy({
+        title: formData.title,
+        abstract: formData.abstract,
+        fundingGoal: Number(formData.fundingGoal),
+        researchField: "Life Sciences"
+      })
+
+      setAiAssistant(prev => ({
+        ...prev,
+        strategy,
+        showStrategy: true,
+        isGeneratingStrategy: false
+      }))
+    } catch (error) {
+      console.error("AI Strategy error:", error)
+      setSubmitStatus({
+        type: "error",
+        message: "Failed to generate funding strategy. Please try again.",
+      })
+      setAiAssistant(prev => ({ ...prev, isGeneratingStrategy: false }))
+    }
+  }
+
+  const suggestCollaborators = async () => {
+    if (!formData.title || !formData.abstract) {
+      setSubmitStatus({
+        type: "error",
+        message: "Please provide title and abstract for collaborator suggestions",
+      })
+      return
+    }
+
+    setAiAssistant(prev => ({ ...prev, isSuggestingCollaborators: true }))
+    
+    try {
+      const collaborators = await GeminiAIService.suggestCollaborators({
+        title: formData.title,
+        abstract: formData.abstract,
+        researchField: "Life Sciences"
+      })
+
+      setAiAssistant(prev => ({
+        ...prev,
+        collaborators,
+        showCollaborators: true,
+        isSuggestingCollaborators: false
+      }))
+    } catch (error) {
+      console.error("AI Collaborators error:", error)
+      setSubmitStatus({
+        type: "error",
+        message: "Failed to suggest collaborators. Please try again.",
+      })
+      setAiAssistant(prev => ({ ...prev, isSuggestingCollaborators: false }))
+    }
+  }
+
+  const applyAISuggestion = (field: keyof FormData, value: string) => {
+    setFormData(prev => ({ ...prev, [field]: value }))
+    // Clear any errors for this field
+    if (formErrors[field]) {
+      setFormErrors(prev => {
+        const newErrors = { ...prev }
+        delete newErrors[field]
+        return newErrors
+      })
+    }
+  }
+  // Auto-completion effect
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      if (formData.title.length > 3 || formData.abstract.length > 10) {
+        try {
+          const suggestions = await GeminiAIService.autoCompleteForm({
+            title: formData.title,
+            abstract: formData.abstract,
+            researchField: "Life Sciences"
+          })
+          setAutoCompleteSuggestions(suggestions)
+        } catch (error) {
+          console.error("Auto-complete error:", error)
+        }
+      }
+    }, 1000)
+
+    return () => clearTimeout(timer)
+  }, [formData.title, formData.abstract])
+
+  // Keyboard shortcuts for AI features
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey) {
+        switch (event.key.toLowerCase()) {
+          case 'a':
+            if (!aiAssistant.isAnalyzing && (formData.title || formData.abstract)) {
+              event.preventDefault()
+              analyzePaperWithAI()
+            }
+            break
+          case 'e':
+            if (!aiAssistant.isEnhancing && formData.abstract.trim()) {
+              event.preventDefault()
+              enhanceAbstractWithAI()
+            }
+            break
+          case 's':
+            if (!aiAssistant.isGeneratingStrategy && formData.title && formData.abstract && formData.fundingGoal) {
+              event.preventDefault()
+              generateFundingStrategy()
+            }
+            break
+          case 'c':
+            if (!aiAssistant.isSuggestingCollaborators && formData.title && formData.abstract) {
+              event.preventDefault()
+              suggestCollaborators()
+            }
+            break
+        }
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [formData, aiAssistant])
 
   if (!connected) {
     return (
@@ -441,15 +745,34 @@ export default function PublishPaperPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-white via-emerald-50/30 to-green-100/20">
       <Navigation />
-      <div className="container mx-auto px-4 py-12 max-w-5xl">
-        {/* Hero Section */}
+      <div className="container mx-auto px-4 py-12 max-w-5xl">        {/* Hero Section */}
         <div className="text-center mb-12">
           <h1 className="text-4xl font-bold mb-4 bg-gradient-to-r from-emerald-600 via-green-600 to-teal-600 bg-clip-text text-transparent">
             Publish Your Research
           </h1>
-          <p className="text-lg text-slate-600 max-w-2xl mx-auto">
+          <p className="text-lg text-slate-600 max-w-2xl mx-auto mb-4">
             Share your groundbreaking research with the scientific community and secure funding for your work
           </p>
+          <div className="flex items-center justify-center space-x-6 text-sm text-slate-500">
+            <div className="flex items-center">
+              <Brain className="h-4 w-4 mr-1 text-purple-500" />
+              <span>AI-Powered Analysis</span>
+            </div>
+            <div className="flex items-center">
+              <Zap className="h-4 w-4 mr-1 text-blue-500" />
+              <span>Smart Auto-Complete</span>
+            </div>
+            <div className="flex items-center">
+              <Target className="h-4 w-4 mr-1 text-green-500" />
+              <span>Funding Strategies</span>
+            </div>
+            <div className="flex items-center">
+              <kbd className="px-2 py-1 text-xs font-semibold text-gray-800 bg-gray-100 border border-gray-200 rounded-lg">Ctrl</kbd>
+              <span className="mx-1">+</span>
+              <kbd className="px-2 py-1 text-xs font-semibold text-gray-800 bg-gray-100 border border-gray-200 rounded-lg">A</kbd>
+              <span className="ml-1">for AI Analysis</span>
+            </div>
+          </div>
         </div>
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
@@ -471,20 +794,106 @@ export default function PublishPaperPage() {
           </TabsList>
 
           <TabsContent value="submit" className="mt-0">
-            <Card className="border-0 shadow-xl bg-white/90 backdrop-blur-sm">
-              <CardHeader>
+            <Card className="border-0 shadow-xl bg-white/90 backdrop-blur-sm">              <CardHeader>
                 <CardTitle className="text-2xl font-bold text-slate-800">Submit Research Paper</CardTitle>
                 <CardDescription className="text-slate-600">
                   Fill out the form below to submit your research paper for peer review and funding
                 </CardDescription>
               </CardHeader>
+              
+              {/* AI Assistant Panel */}
+              <div className="px-6 pb-6">
+                <Card className="bg-gradient-to-r from-blue-50 to-purple-50 border-purple-200">
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-lg flex items-center text-purple-800">
+                      <Brain className="h-5 w-5 mr-2" />
+                      AI Research Assistant
+                    </CardTitle>
+                    <CardDescription className="text-purple-600">
+                      Let AI help you optimize your research paper submission
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={analyzePaperWithAI}
+                        disabled={aiAssistant.isAnalyzing || (!formData.title && !formData.abstract)}
+                        className="border-purple-200 hover:bg-purple-50 text-purple-700"
+                      >
+                        {aiAssistant.isAnalyzing ? (
+                          <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                        ) : (
+                          <Search className="h-3 w-3 mr-1" />
+                        )}
+                        Analyze Paper
+                      </Button>
+                      
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={enhanceAbstractWithAI}
+                        disabled={aiAssistant.isEnhancing || !formData.abstract.trim()}
+                        className="border-purple-200 hover:bg-purple-50 text-purple-700"
+                      >
+                        {aiAssistant.isEnhancing ? (
+                          <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                        ) : (
+                          <Wand2 className="h-3 w-3 mr-1" />
+                        )}
+                        Enhance Abstract
+                      </Button>
+                      
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={generateFundingStrategy}
+                        disabled={aiAssistant.isGeneratingStrategy || !formData.title || !formData.abstract || !formData.fundingGoal}
+                        className="border-purple-200 hover:bg-purple-50 text-purple-700"
+                      >
+                        {aiAssistant.isGeneratingStrategy ? (
+                          <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                        ) : (
+                          <Target className="h-3 w-3 mr-1" />
+                        )}
+                        Funding Strategy
+                      </Button>
+                      
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={suggestCollaborators}
+                        disabled={aiAssistant.isSuggestingCollaborators || !formData.title || !formData.abstract}
+                        className="border-purple-200 hover:bg-purple-50 text-purple-700"
+                      >
+                        {aiAssistant.isSuggestingCollaborators ? (
+                          <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                        ) : (
+                          <Users className="h-3 w-3 mr-1" />
+                        )}
+                        Find Collaborators
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
               <CardContent>
-                <form onSubmit={handleSubmit} className="space-y-6">
-                  {/* Title */}
+                <form onSubmit={handleSubmit} className="space-y-6">                  {/* Title */}
                   <div className="space-y-2">
                     <Label htmlFor="title" className="text-slate-700 font-medium flex items-center">
                       <FileText className="h-4 w-4 mr-2 text-emerald-600" />
                       Paper Title
+                      {aiAssistant.analysis?.suggestedTitle && (
+                        <Badge variant="secondary" className="ml-2 text-xs bg-blue-100 text-blue-700">
+                          <Lightbulb className="h-3 w-3 mr-1" />
+                          AI Suggestion Available
+                        </Badge>
+                      )}
                     </Label>
                     <Input
                       id="title"
@@ -496,14 +905,50 @@ export default function PublishPaperPage() {
                         formErrors.title ? "border-red-300" : ""
                       }`}
                     />
+                    {aiAssistant.analysis?.suggestedTitle && aiAssistant.analysis.suggestedTitle !== formData.title && (
+                      <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <p className="text-sm font-medium text-blue-800 mb-1">AI Suggested Title:</p>
+                            <p className="text-sm text-blue-700">{aiAssistant.analysis.suggestedTitle}</p>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => applyAISuggestion("title", aiAssistant.analysis!.suggestedTitle!)}
+                            className="ml-2 border-blue-300 text-blue-700 hover:bg-blue-100"
+                          >
+                            <Zap className="h-3 w-3 mr-1" />
+                            Apply
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                    {autoCompleteSuggestions?.suggestedTitle && !formData.title && (
+                      <div className="p-2 bg-yellow-50 border border-yellow-200 rounded text-sm">
+                        <span className="text-yellow-800">Auto-suggestion: </span>
+                        <button
+                          type="button"
+                          className="text-yellow-700 underline hover:text-yellow-900"
+                          onClick={() => applyAISuggestion("title", autoCompleteSuggestions.suggestedTitle)}
+                        >
+                          {autoCompleteSuggestions.suggestedTitle}
+                        </button>
+                      </div>
+                    )}
                     {formErrors.title && <p className="text-red-500 text-sm">{formErrors.title}</p>}
-                  </div>
-
-                  {/* Abstract */}
+                  </div>                  {/* Abstract */}
                   <div className="space-y-2">
                     <Label htmlFor="abstract" className="text-slate-700 font-medium flex items-center">
                       <FileText className="h-4 w-4 mr-2 text-emerald-600" />
                       Abstract
+                      {(aiAssistant.analysis?.improvedAbstract || aiAssistant.enhancedAbstract) && (
+                        <Badge variant="secondary" className="ml-2 text-xs bg-blue-100 text-blue-700">
+                          <Lightbulb className="h-3 w-3 mr-1" />
+                          AI Enhancement Available
+                        </Badge>
+                      )}
                     </Label>
                     <Textarea
                       id="abstract"
@@ -515,6 +960,80 @@ export default function PublishPaperPage() {
                         formErrors.abstract ? "border-red-300" : ""
                       }`}
                     />
+                    
+                    {/* Enhanced Abstract Suggestion */}
+                    {aiAssistant.enhancedAbstract && (
+                      <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
+                        <div className="flex items-start justify-between mb-2">
+                          <h4 className="text-sm font-medium text-green-800">Enhanced Abstract:</h4>
+                          <div className="flex items-center space-x-2">
+                            <Badge variant="secondary" className="bg-green-100 text-green-700">
+                              Readability: {aiAssistant.enhancedAbstract.readabilityScore}/10
+                            </Badge>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => applyAISuggestion("abstract", aiAssistant.enhancedAbstract.enhancedAbstract)}
+                              className="border-green-300 text-green-700 hover:bg-green-100"
+                            >
+                              <Zap className="h-3 w-3 mr-1" />
+                              Apply
+                            </Button>
+                          </div>
+                        </div>
+                        <p className="text-sm text-green-700 mb-3">{aiAssistant.enhancedAbstract.enhancedAbstract}</p>
+                        {aiAssistant.enhancedAbstract.improvements && (
+                          <div>
+                            <p className="text-xs font-medium text-green-800 mb-1">Key Improvements:</p>
+                            <ul className="text-xs text-green-700 space-y-1">
+                              {aiAssistant.enhancedAbstract.improvements.map((improvement: string, index: number) => (
+                                <li key={index} className="flex items-start">
+                                  <span className="text-green-500 mr-1">•</span>
+                                  {improvement}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    
+                    {/* AI Analysis Improved Abstract */}
+                    {aiAssistant.analysis?.improvedAbstract && aiAssistant.analysis.improvedAbstract !== formData.abstract && !aiAssistant.enhancedAbstract && (
+                      <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <p className="text-sm font-medium text-blue-800 mb-1">AI Improved Abstract:</p>
+                            <p className="text-sm text-blue-700">{aiAssistant.analysis.improvedAbstract}</p>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => applyAISuggestion("abstract", aiAssistant.analysis!.improvedAbstract!)}
+                            className="ml-2 border-blue-300 text-blue-700 hover:bg-blue-100"
+                          >
+                            <Zap className="h-3 w-3 mr-1" />
+                            Apply
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {autoCompleteSuggestions?.suggestedAbstract && !formData.abstract && (
+                      <div className="p-2 bg-yellow-50 border border-yellow-200 rounded text-sm">
+                        <span className="text-yellow-800">Auto-suggestion: </span>
+                        <button
+                          type="button"
+                          className="text-yellow-700 underline hover:text-yellow-900"
+                          onClick={() => applyAISuggestion("abstract", autoCompleteSuggestions.suggestedAbstract)}
+                        >
+                          Click to apply suggested abstract
+                        </button>
+                      </div>
+                    )}
+                    
                     {formErrors.abstract && <p className="text-red-500 text-sm">{formErrors.abstract}</p>}
                   </div>
 
@@ -613,13 +1132,17 @@ export default function PublishPaperPage() {
                       </div>
                     </div>
                     {formErrors.paperFile && <p className="text-red-500 text-sm">{formErrors.paperFile}</p>}
-                  </div>
-
-                  {/* Funding Goal */}
+                  </div>                  {/* Funding Goal */}
                   <div className="space-y-2">
                     <Label htmlFor="funding-goal" className="text-slate-700 font-medium flex items-center">
                       <Coins className="h-4 w-4 mr-2 text-emerald-600" />
                       Funding Goal (Tokens)
+                      {aiAssistant.analysis?.estimatedFundingGoal && (
+                        <Badge variant="secondary" className="ml-2 text-xs bg-blue-100 text-blue-700">
+                          <TrendingUp className="h-3 w-3 mr-1" />
+                          AI Estimated
+                        </Badge>
+                      )}
                     </Label>
                     <Input
                       id="funding-goal"
@@ -633,18 +1156,46 @@ export default function PublishPaperPage() {
                         formErrors.fundingGoal ? "border-red-300" : ""
                       }`}
                     />
+                    {aiAssistant.analysis?.estimatedFundingGoal && !formData.fundingGoal && (
+                      <div className="p-2 bg-blue-50 border border-blue-200 rounded text-sm">
+                        <span className="text-blue-800">AI Estimated Funding: </span>
+                        <button
+                          type="button"
+                          className="text-blue-700 underline hover:text-blue-900 font-medium"
+                          onClick={() => applyAISuggestion("fundingGoal", aiAssistant.analysis!.estimatedFundingGoal!.toString())}
+                        >
+                          ${aiAssistant.analysis.estimatedFundingGoal.toLocaleString()} tokens
+                        </button>
+                      </div>
+                    )}
+                    {autoCompleteSuggestions?.suggestedFundingGoal && !formData.fundingGoal && (
+                      <div className="p-2 bg-yellow-50 border border-yellow-200 rounded text-sm">
+                        <span className="text-yellow-800">Suggested Funding: </span>
+                        <button
+                          type="button"
+                          className="text-yellow-700 underline hover:text-yellow-900"
+                          onClick={() => applyAISuggestion("fundingGoal", autoCompleteSuggestions.suggestedFundingGoal.toString())}
+                        >
+                          ${autoCompleteSuggestions.suggestedFundingGoal.toLocaleString()} tokens
+                        </button>
+                      </div>
+                    )}
                     {formErrors.fundingGoal ? (
                       <p className="text-red-500 text-sm">{formErrors.fundingGoal}</p>
                     ) : (
                       <p className="text-sm text-slate-500">Amount of tokens needed to fund this research</p>
                     )}
-                  </div>
-
-                  {/* Funding Period */}
+                  </div>                  {/* Funding Period */}
                   <div className="space-y-2">
                     <Label htmlFor="funding-period" className="text-slate-700 font-medium flex items-center">
                       <Calendar className="h-4 w-4 mr-2 text-emerald-600" />
                       Funding Period (Days)
+                      {aiAssistant.analysis?.suggestedFundingPeriod && (
+                        <Badge variant="secondary" className="ml-2 text-xs bg-blue-100 text-blue-700">
+                          <Calendar className="h-3 w-3 mr-1" />
+                          AI Suggested
+                        </Badge>
+                      )}
                     </Label>
                     <Input
                       id="funding-period"
@@ -658,6 +1209,18 @@ export default function PublishPaperPage() {
                         formErrors.fundingPeriodDays ? "border-red-300" : ""
                       }`}
                     />
+                    {aiAssistant.analysis?.suggestedFundingPeriod && formData.fundingPeriodDays === "30" && (
+                      <div className="p-2 bg-blue-50 border border-blue-200 rounded text-sm">
+                        <span className="text-blue-800">AI Suggested Period: </span>
+                        <button
+                          type="button"
+                          className="text-blue-700 underline hover:text-blue-900 font-medium"
+                          onClick={() => applyAISuggestion("fundingPeriodDays", aiAssistant.analysis!.suggestedFundingPeriod!.toString())}
+                        >
+                          {aiAssistant.analysis.suggestedFundingPeriod} days
+                        </button>
+                      </div>
+                    )}
                     {formErrors.fundingPeriodDays ? (
                       <p className="text-red-500 text-sm">{formErrors.fundingPeriodDays}</p>
                     ) : (
@@ -741,10 +1304,251 @@ export default function PublishPaperPage() {
                         Submit Paper
                       </div>
                     )}
-                  </Button>
-                </form>
+                  </Button>                </form>
               </CardContent>
             </Card>
+
+            {/* AI Analysis Results */}
+            {aiAssistant.showAnalysis && aiAssistant.analysis && (
+              <Card className="mt-6 border-0 shadow-xl bg-gradient-to-br from-purple-50 to-blue-50 backdrop-blur-sm">
+                <CardHeader>
+                  <CardTitle className="text-xl font-bold text-purple-800 flex items-center">
+                    <Brain className="h-5 w-5 mr-2" />
+                    AI Paper Analysis
+                  </CardTitle>
+                  <CardDescription className="text-purple-600">
+                    Comprehensive analysis and suggestions for your research paper
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {/* Innovation Score */}
+                    {aiAssistant.analysis.innovationScore && (
+                      <div className="p-4 bg-white/60 rounded-lg border border-purple-200">
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="font-medium text-purple-800">Innovation Score</h4>
+                          <Badge variant="secondary" className="bg-purple-100 text-purple-700">
+                            {aiAssistant.analysis.innovationScore}/10
+                          </Badge>
+                        </div>
+                        <div className="w-full bg-purple-200 rounded-full h-2">
+                          <div 
+                            className="bg-purple-600 h-2 rounded-full" 
+                            style={{ width: `${(aiAssistant.analysis.innovationScore / 10) * 100}%` }}
+                          ></div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Research Domain */}
+                    {aiAssistant.analysis.researchDomain && (
+                      <div className="p-4 bg-white/60 rounded-lg border border-purple-200">
+                        <h4 className="font-medium text-purple-800 mb-2">Research Domain</h4>
+                        <p className="text-sm text-purple-700">{aiAssistant.analysis.researchDomain}</p>
+                      </div>
+                    )}
+
+                    {/* Market Potential */}
+                    {aiAssistant.analysis.marketPotential && (
+                      <div className="p-4 bg-white/60 rounded-lg border border-purple-200">
+                        <h4 className="font-medium text-purple-800 mb-2">Market Potential</h4>
+                        <p className="text-sm text-purple-700">{aiAssistant.analysis.marketPotential}</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Keywords */}
+                  {aiAssistant.analysis.keywords && aiAssistant.analysis.keywords.length > 0 && (
+                    <div className="p-4 bg-white/60 rounded-lg border border-purple-200">
+                      <h4 className="font-medium text-purple-800 mb-3">Suggested Keywords</h4>
+                      <div className="flex flex-wrap gap-2">
+                        {aiAssistant.analysis.keywords.map((keyword, index) => (
+                          <Badge key={index} variant="secondary" className="bg-purple-100 text-purple-700">
+                            {keyword}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Target Audience */}
+                  {aiAssistant.analysis.targetAudience && aiAssistant.analysis.targetAudience.length > 0 && (
+                    <div className="p-4 bg-white/60 rounded-lg border border-purple-200">
+                      <h4 className="font-medium text-purple-800 mb-3">Target Audience</h4>
+                      <div className="space-y-2">
+                        {aiAssistant.analysis.targetAudience.map((audience, index) => (
+                          <div key={index} className="flex items-center text-sm text-purple-700">
+                            <Users className="h-3 w-3 mr-2" />
+                            {audience}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Risks */}
+                  {aiAssistant.analysis.risks && aiAssistant.analysis.risks.length > 0 && (
+                    <div className="p-4 bg-white/60 rounded-lg border border-purple-200">
+                      <h4 className="font-medium text-purple-800 mb-3">Potential Risks</h4>
+                      <div className="space-y-2">
+                        {aiAssistant.analysis.risks.map((risk, index) => (
+                          <div key={index} className="flex items-start text-sm text-purple-700">
+                            <span className="text-red-500 mr-2 mt-1">•</span>
+                            {risk}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Suggestions */}
+                  {aiAssistant.analysis.suggestions && aiAssistant.analysis.suggestions.length > 0 && (
+                    <div className="p-4 bg-white/60 rounded-lg border border-purple-200">
+                      <h4 className="font-medium text-purple-800 mb-3">AI Suggestions</h4>
+                      <div className="space-y-2">
+                        {aiAssistant.analysis.suggestions.map((suggestion, index) => (
+                          <div key={index} className="flex items-start text-sm text-purple-700">
+                            <Lightbulb className="h-3 w-3 mr-2 mt-1 text-yellow-500" />
+                            {suggestion}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* AI Funding Strategy */}
+            {aiAssistant.showStrategy && aiAssistant.strategy && (
+              <Card className="mt-6 border-0 shadow-xl bg-gradient-to-br from-green-50 to-emerald-50 backdrop-blur-sm">
+                <CardHeader>
+                  <CardTitle className="text-xl font-bold text-green-800 flex items-center">
+                    <Target className="h-5 w-5 mr-2" />
+                    AI Funding Strategy
+                  </CardTitle>
+                  <CardDescription className="text-green-600">
+                    Strategic recommendations for securing research funding
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {/* Strategy Overview */}
+                  <div className="p-4 bg-white/60 rounded-lg border border-green-200">
+                    <h4 className="font-medium text-green-800 mb-2">Strategy Overview</h4>
+                    <p className="text-sm text-green-700">{aiAssistant.strategy.strategy}</p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* Milestones */}
+                    {aiAssistant.strategy.milestones && aiAssistant.strategy.milestones.length > 0 && (
+                      <div className="p-4 bg-white/60 rounded-lg border border-green-200">
+                        <h4 className="font-medium text-green-800 mb-3">Key Milestones</h4>
+                        <div className="space-y-2">
+                          {aiAssistant.strategy.milestones.map((milestone: string, index: number) => (
+                            <div key={index} className="flex items-start text-sm text-green-700">
+                              <CheckCircle2 className="h-3 w-3 mr-2 mt-1 text-green-500" />
+                              {milestone}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Risk Mitigation */}
+                    {aiAssistant.strategy.riskMitigation && aiAssistant.strategy.riskMitigation.length > 0 && (
+                      <div className="p-4 bg-white/60 rounded-lg border border-green-200">
+                        <h4 className="font-medium text-green-800 mb-3">Risk Mitigation</h4>
+                        <div className="space-y-2">
+                          {aiAssistant.strategy.riskMitigation.map((mitigation: string, index: number) => (
+                            <div key={index} className="flex items-start text-sm text-green-700">
+                              <span className="text-green-500 mr-2 mt-1">•</span>
+                              {mitigation}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Alternative Funding */}
+                  {aiAssistant.strategy.alternativeFunding && aiAssistant.strategy.alternativeFunding.length > 0 && (
+                    <div className="p-4 bg-white/60 rounded-lg border border-green-200">
+                      <h4 className="font-medium text-green-800 mb-3">Alternative Funding Sources</h4>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        {aiAssistant.strategy.alternativeFunding.map((source: string, index: number) => (
+                          <div key={index} className="flex items-center text-sm text-green-700 p-2 bg-green-100 rounded">
+                            <Coins className="h-3 w-3 mr-2" />
+                            {source}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* AI Collaborator Suggestions */}
+            {aiAssistant.showCollaborators && aiAssistant.collaborators && (
+              <Card className="mt-6 border-0 shadow-xl bg-gradient-to-br from-blue-50 to-indigo-50 backdrop-blur-sm">
+                <CardHeader>
+                  <CardTitle className="text-xl font-bold text-blue-800 flex items-center">
+                    <Users className="h-5 w-5 mr-2" />
+                    AI Collaborator Suggestions
+                  </CardTitle>
+                  <CardDescription className="text-blue-600">
+                    Find the right expertise and institutions for your research
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {/* Suggested Collaborators */}
+                    {aiAssistant.collaborators.suggestedCollaborators && aiAssistant.collaborators.suggestedCollaborators.length > 0 && (
+                      <div className="p-4 bg-white/60 rounded-lg border border-blue-200">
+                        <h4 className="font-medium text-blue-800 mb-3">Suggested Collaborators</h4>
+                        <div className="space-y-2">
+                          {aiAssistant.collaborators.suggestedCollaborators.map((collaborator: string, index: number) => (
+                            <div key={index} className="flex items-center text-sm text-blue-700 p-2 bg-blue-100 rounded">
+                              <Users className="h-3 w-3 mr-2" />
+                              {collaborator}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Expertise Areas */}
+                    {aiAssistant.collaborators.expertiseAreas && aiAssistant.collaborators.expertiseAreas.length > 0 && (
+                      <div className="p-4 bg-white/60 rounded-lg border border-blue-200">
+                        <h4 className="font-medium text-blue-800 mb-3">Required Expertise</h4>
+                        <div className="space-y-2">
+                          {aiAssistant.collaborators.expertiseAreas.map((expertise: string, index: number) => (
+                            <Badge key={index} variant="secondary" className="bg-blue-100 text-blue-700 mr-1 mb-1">
+                              {expertise}
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Institution Recommendations */}
+                    {aiAssistant.collaborators.institutionRecommendations && aiAssistant.collaborators.institutionRecommendations.length > 0 && (
+                      <div className="p-4 bg-white/60 rounded-lg border border-blue-200">
+                        <h4 className="font-medium text-blue-800 mb-3">Institution Types</h4>
+                        <div className="space-y-2">
+                          {aiAssistant.collaborators.institutionRecommendations.map((institution: string, index: number) => (
+                            <div key={index} className="flex items-center text-sm text-blue-700 p-2 bg-blue-100 rounded">
+                              <span className="text-blue-500 mr-2">🏢</span>
+                              {institution}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
           </TabsContent>
 
           <TabsContent value="drafts" className="mt-0">
@@ -876,8 +1680,82 @@ export default function PublishPaperPage() {
                 )}
               </CardContent>
             </Card>
-          </TabsContent>
-        </Tabs>
+          </TabsContent>        </Tabs>
+
+        {/* Floating AI Assistant Button */}
+        {activeTab === "submit" && (
+          <div className="fixed bottom-6 right-6 z-50">
+            <div className="relative">
+              {(aiAssistant.analysis || aiAssistant.enhancedAbstract || aiAssistant.strategy || aiAssistant.collaborators) && (
+                <div className="absolute -top-2 -right-2 w-4 h-4 bg-red-500 rounded-full flex items-center justify-center">
+                  <span className="text-xs text-white font-bold">!</span>
+                </div>
+              )}
+              <Button
+                onClick={analyzePaperWithAI}
+                disabled={aiAssistant.isAnalyzing || (!formData.title && !formData.abstract)}
+                className="w-14 h-14 rounded-full bg-gradient-to-r from-purple-500 to-blue-500 hover:from-purple-600 hover:to-blue-600 text-white shadow-lg hover:shadow-xl transition-all duration-300"
+                title="Quick AI Analysis (Ctrl+A)"
+              >
+                {aiAssistant.isAnalyzing ? (
+                  <Loader2 className="h-6 w-6 animate-spin" />
+                ) : (
+                  <Brain className="h-6 w-6" />
+                )}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* AI Summary Panel */}
+        {(aiAssistant.analysis || aiAssistant.enhancedAbstract || aiAssistant.strategy || aiAssistant.collaborators) && (
+          <div className="fixed bottom-6 left-6 max-w-sm z-40">
+            <Card className="bg-white/95 backdrop-blur-sm border-purple-200 shadow-xl">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-purple-800 flex items-center">
+                  <Sparkles className="h-4 w-4 mr-2" />
+                  AI Insights Summary
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="pt-0">
+                <div className="space-y-2 text-xs text-purple-700">
+                  {aiAssistant.analysis && (
+                    <div className="flex items-center justify-between p-2 bg-purple-50 rounded">
+                      <span>Paper Analysis</span>
+                      <Badge variant="secondary" className="bg-purple-100 text-purple-800 text-xs">
+                        {aiAssistant.analysis.innovationScore ? `${aiAssistant.analysis.innovationScore}/10` : 'Complete'}
+                      </Badge>
+                    </div>
+                  )}
+                  {aiAssistant.enhancedAbstract && (
+                    <div className="flex items-center justify-between p-2 bg-green-50 rounded">
+                      <span>Abstract Enhancement</span>
+                      <Badge variant="secondary" className="bg-green-100 text-green-800 text-xs">
+                        {aiAssistant.enhancedAbstract.readabilityScore}/10
+                      </Badge>
+                    </div>
+                  )}
+                  {aiAssistant.strategy && (
+                    <div className="flex items-center justify-between p-2 bg-blue-50 rounded">
+                      <span>Funding Strategy</span>
+                      <Badge variant="secondary" className="bg-blue-100 text-blue-800 text-xs">
+                        Ready
+                      </Badge>
+                    </div>
+                  )}
+                  {aiAssistant.collaborators && (
+                    <div className="flex items-center justify-between p-2 bg-yellow-50 rounded">
+                      <span>Collaborator Suggestions</span>
+                      <Badge variant="secondary" className="bg-yellow-100 text-yellow-800 text-xs">
+                        {aiAssistant.collaborators.suggestedCollaborators?.length || 0} Found
+                      </Badge>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
       </div>
     </div>
   )
