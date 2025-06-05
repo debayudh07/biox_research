@@ -10,8 +10,8 @@ import {
   getMintLen,
   getMinimumBalanceForRentExemptMint,
   TOKEN_PROGRAM_ID,
-  ASSOCIATED_TOKEN_PROGRAM_ID
-} from "@solana/spl-token";
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  getAssociatedTokenAddress} from "@solana/spl-token";
 import { BioxResearch } from "./biox_research";
 import idl from "./biox_research.json";
 
@@ -20,34 +20,105 @@ export const PROGRAM_ID = new PublicKey("4TsLtFAfkbpcFjesanK4ojZNTK1bsQPfPuVxt5g
 
 // BioX Research Platform Token Mint (using USDC for testing)
 // For production, this would be a custom token mint
-export const BIOX_TOKEN_MINT = new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"); // USDC devnet mint
+export const BIOX_TOKEN_MINT = new PublicKey("5v8NRPNxkiTd4HXbPNvGMpvAhffVMANYc8JB6wFccnMx"); // Official BIOX token
 
-// Helper function to extract publicKey from wallet
-export function getWalletPublicKey(wallet: { adapter?: { publicKey?: PublicKey }; publicKey?: PublicKey }): PublicKey {
-  const publicKey = wallet.adapter?.publicKey || wallet.publicKey;
-  if (!publicKey) {
-    throw new Error("Wallet is not connected or does not have a public key");
-  }
-  return publicKey;
+// Replace the current token mint management with this
+let CURRENT_TOKEN_MINT: PublicKey = BIOX_TOKEN_MINT; // Default to the official BIOX token
+
+// Function to get the current working token mint
+export function getCurrentTokenMint(): PublicKey {
+  return CURRENT_TOKEN_MINT;
 }
 
-// Helper function to create wallet adapter for Anchor
-export function createWalletAdapter(wallet: { 
-  adapter?: { 
-    publicKey?: PublicKey; 
-    signTransaction?: Function; 
-    signAllTransactions?: Function; 
-  }; 
-  publicKey?: PublicKey; 
-  signTransaction?: Function; 
-  signAllTransactions?: Function; 
-}) {
-  const publicKey = getWalletPublicKey(wallet);
+// Function to set the current token mint
+export function setCurrentTokenMint(mintAddress: PublicKey) {
+  CURRENT_TOKEN_MINT = mintAddress;
+  console.log("Updated current token mint to:", mintAddress.toString());
+}
+
+// Create a working token mint for testing
+export async function createWorkingTokenMint(wallet: any, connection: Connection) {
+  try {
+    const walletPublicKey = getWalletPublicKey(wallet);
+    
+    // Generate a new keypair for the mint
+    const mintKeypair = Keypair.generate();
+    
+    console.log("Creating new token mint:", mintKeypair.publicKey.toString());
+    
+    // Calculate rent-exempt balance for mint account
+    const rentExemptBalance = await getMinimumBalanceForRentExemptMint(connection);
+    
+    // Create mint account transaction
+    const createMintAccountIx = SystemProgram.createAccount({
+      fromPubkey: walletPublicKey,
+      newAccountPubkey: mintKeypair.publicKey,
+      space: getMintLen([]),
+      lamports: rentExemptBalance,
+      programId: TOKEN_PROGRAM_ID,
+    });
+    
+    // Initialize mint instruction
+    const initializeMintIx = createInitializeMintInstruction(
+      mintKeypair.publicKey,
+      6, // 6 decimals like USDC
+      walletPublicKey, // mint authority
+      walletPublicKey  // freeze authority
+    );
+    
+    // Create transaction
+    const transaction = new Transaction()
+      .add(createMintAccountIx)
+      .add(initializeMintIx);
+    
+    // Sign with mint keypair
+    transaction.partialSign(mintKeypair);
+    
+    // Send transaction
+    const signature = await sendTransactionWithWallet(wallet, transaction, connection);
+    
+    console.log("Token mint created successfully:", mintKeypair.publicKey.toString());
+    
+    // Set this as the current working mint
+    setCurrentTokenMint(mintKeypair.publicKey);
+    
+    return {
+      success: true,
+      mintAddress: mintKeypair.publicKey,
+      signature: signature
+    };
+  } catch (error: any) {
+    console.error("Error creating token mint:", error);
+    return {
+      success: false,
+      error: error.message || "Failed to create token mint"
+    };
+  }
+}
+
+// Helper function to extract public key from wallet
+function getWalletPublicKey(wallet: any): PublicKey {
+  if (!wallet) {
+    throw new Error("Wallet is required");
+  }
   
+  if (wallet.publicKey) {
+    return wallet.publicKey;
+  }
+  
+  if (wallet.adapter?.publicKey) {
+    return wallet.adapter.publicKey;
+  }
+  
+  throw new Error("Unable to get public key from wallet");
+}
+
+// Helper function to create wallet adapter
+function createWalletAdapter(wallet: any) {
   return {
-    publicKey,
-    signTransaction: wallet.adapter?.signTransaction?.bind(wallet.adapter) || wallet.signTransaction?.bind(wallet),
-    signAllTransactions: wallet.adapter?.signAllTransactions?.bind(wallet.adapter) || wallet.signAllTransactions?.bind(wallet),
+    publicKey: getWalletPublicKey(wallet),
+    signTransaction: wallet.signTransaction?.bind(wallet) || wallet.adapter?.signTransaction?.bind(wallet.adapter),
+    signAllTransactions: wallet.signAllTransactions?.bind(wallet) || wallet.adapter?.signAllTransactions?.bind(wallet.adapter),
   };
 }
 
@@ -622,7 +693,7 @@ export async function votePaperWorkflow(
   wallet: any,
   paperId: number,
   isUpvote: boolean,
-  voterTokenAccount: PublicKey
+  voterTokenAccount?: PublicKey // Make optional, will create if needed
 ) {
   try {
     // Validate wallet first
@@ -655,6 +726,46 @@ export async function votePaperWorkflow(
     // Initialize program
     const program = initializeProgram(wallet);
     
+    // Get or create voter token account if not provided
+    let finalVoterTokenAccount = voterTokenAccount;
+    if (!finalVoterTokenAccount) {
+      const userPublicKey = getWalletPublicKey(wallet);
+      const currentMint = getCurrentTokenMint();
+      
+      try {
+        finalVoterTokenAccount = await getAssociatedTokenAddress(
+          currentMint,
+          userPublicKey
+        );
+        
+        // Ensure the account exists
+        const connection = program.provider.connection;
+        const accountInfo = await connection.getAccountInfo(finalVoterTokenAccount);
+        
+        if (!accountInfo) {
+          // Create the token account
+          const createATAIx = createAssociatedTokenAccountInstruction(
+            userPublicKey, // payer
+            finalVoterTokenAccount, // associatedToken
+            userPublicKey, // owner
+            currentMint // mint
+          );
+          
+          const transaction = new Transaction().add(createATAIx);
+          const signature = await sendTransactionWithWallet(wallet, transaction, connection);
+          await connection.confirmTransaction(signature, "confirmed");
+          
+          console.log("Created voter token account:", finalVoterTokenAccount.toString());
+        }
+      } catch (error) {
+        console.error("Error setting up voter token account:", error);
+        return {
+          success: false,
+          error: "Failed to set up token account for voting"
+        };
+      }
+    }
+    
     // Check if paper exists and is published first
     const paperResult = await getPaperDetails(program, paperId);
     if (!paperResult.success) {
@@ -681,7 +792,7 @@ export async function votePaperWorkflow(
     }
     
     // Vote on paper (this includes the hasUserVoted check)
-    const result = await votePaper(program, wallet, paperId, isUpvote, voterTokenAccount);
+    const result = await votePaper(program, wallet, paperId, isUpvote, finalVoterTokenAccount);
     
     return result;
   } catch (error) {
@@ -737,55 +848,33 @@ export async function fundPaperWorkflow(
   wallet: any,
   paperId: number,
   amount: number,
-  funderTokenAccount: PublicKey
+  tokenMint: PublicKey = BIOX_TOKEN_MINT
 ) {
   try {
-    // Validate wallet first
-    if (!wallet) {
-      return {
-        success: false,
-        error: "Wallet is required"
-      };
-    }
-    
-    // Check if wallet is connected
-    if (!isWalletConnected(wallet)) {
-      return {
-        success: false,
-        error: "Wallet is not connected"
-      };
-    }
-    
-    // Validate inputs
-    if (paperId < 0) {
-      return {
-        success: false,
-        error: "Invalid paper ID"
-      };
-    }
-    
-    if (amount <= 0) {
-      return {
-        success: false,
-        error: "Amount must be greater than 0"
-      };
-    }
-    
-    console.log("Connection Info:", getConnectionInfo());
-    console.log("Wallet Public Key:", getWalletPublicKey(wallet).toString());
+    console.log("Starting funding workflow...");
+    console.log("Paper ID:", paperId);
+    console.log("Amount:", amount);
+    console.log("Token Mint:", tokenMint.toString());
     
     // Initialize program
     const program = initializeProgram(wallet);
     
-    // Fund paper
-    const result = await fundPaper(program, wallet, paperId, amount, funderTokenAccount);
+    // Use the enhanced funding function
+    const result = await fundPaperWithTokenAccountCreation(
+      program,
+      wallet,
+      paperId,
+      amount,
+      tokenMint
+    );
     
     return result;
-  } catch (error) {
-    console.error("fundPaperWorkflow error:", error);
+    
+  } catch (error: any) {
+    console.error("Funding workflow error:", error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Unknown error occurred while funding paper"
+      error: error.message || "Failed to complete funding workflow"
     };
   }
 }
@@ -1210,8 +1299,20 @@ export async function createBioXTokenMint(
   }
 }
 
-// Mint tokens to a user's account
+// Mint tokens to a user's account (wrapper for enhanced function)
 export async function mintBioXTokens(
+  wallet: any,
+  connection: Connection,
+  mintAddress: PublicKey,
+  recipientAddress: PublicKey,
+  amount: number // Amount in token units (will be adjusted for decimals)
+) {
+  // Use the enhanced version that handles both custom tokens and USDC
+  return await mintBioXTokensEnhanced(wallet, connection, mintAddress, recipientAddress, amount);
+}
+
+// Enhanced mintBioXTokens function to work with USDC and custom tokens
+export async function mintBioXTokensEnhanced(
   wallet: any,
   connection: Connection,
   mintAddress: PublicKey,
@@ -1220,6 +1321,12 @@ export async function mintBioXTokens(
 ) {
   try {
     const walletPublicKey = getWalletPublicKey(wallet);
+    
+    // Get mint info to determine decimals
+    const mintInfo = await connection.getAccountInfo(mintAddress);
+    if (!mintInfo) {
+      throw new Error("Mint account does not exist");
+    }
     
     // Get or create associated token account for recipient
     const recipientTokenAccount = getAssociatedTokenAddressSync(
@@ -1234,6 +1341,7 @@ export async function mintBioXTokens(
     
     // Create token account if it doesn't exist
     if (!accountInfo) {
+      console.log("Creating token account for:", recipientAddress.toString());
       instructions.push(
         createAssociatedTokenAccountInstruction(
           walletPublicKey, // payer
@@ -1244,34 +1352,349 @@ export async function mintBioXTokens(
       );
     }
     
-    // Add mint instruction
-    instructions.push(
-      createMintToInstruction(
-        mintAddress, // mint
-        recipientTokenAccount, // destination
-        walletPublicKey, // authority
-        amount * Math.pow(10, 6) // amount with decimals (assuming 6 decimals)
-      )
-    );
+    // Check if wallet has mint authority for this token
+    // For USDC devnet, typically the wallet won't have mint authority
+    // For custom tokens created by the wallet, it will have mint authority
+    try {
+      // Add mint instruction (this will fail if wallet doesn't have mint authority)
+      instructions.push(
+        createMintToInstruction(
+          mintAddress, // mint
+          recipientTokenAccount, // destination
+          walletPublicKey, // authority
+          amount * Math.pow(10, 6) // amount with decimals (assuming 6 decimals)
+        )
+      );
+      
       // Create transaction
-    const transaction = new Transaction().add(...instructions);
+      const transaction = new Transaction().add(...instructions);
+      
+      // Send transaction using helper function
+      const signature = await sendTransactionWithWallet(wallet, transaction, connection);
+      
+      console.log(`Minted ${amount} tokens to ${recipientAddress.toString()}`);
+      
+      return {
+        success: true,
+        signature: signature,
+        tokenAccount: recipientTokenAccount,
+        message: `Successfully minted ${amount} tokens`
+      };
+      
+    } catch (mintError: any) {
+      // If minting fails due to authority issues, just create the account
+      if (mintError.message?.includes("authority") || mintError.message?.includes("unauthorized")) {
+        console.log("No mint authority - creating token account only");
+        
+        if (instructions.length === 1) { // Only account creation instruction
+          const transaction = new Transaction().add(instructions[0]);
+          const signature = await sendTransactionWithWallet(wallet, transaction, connection);
+          
+          return {
+            success: true,
+            signature: signature,
+            tokenAccount: recipientTokenAccount,
+            message: "Token account created. You'll need to get tokens from a faucet or exchange.",
+            needsFaucet: true
+          };
+        }
+      }
+      throw mintError;
+    }
     
-    // Send transaction using helper function
-    const signature = await sendTransactionWithWallet(wallet, transaction, connection);
-    
-    console.log(`Minted ${amount} tokens to ${recipientAddress.toString()}`);
-    
-    return {
-      success: true,
-      signature: signature,
-      tokenAccount: recipientTokenAccount
-    };
   } catch (error: any) {
     console.error("Error minting tokens:", error);
     return {
       success: false,
       error: error.message || "Failed to mint tokens"
     };
+  }
+}
+
+// Simplified function to just create a USDC token account
+export async function createUSDCAccount(
+  wallet: any,
+  connection: Connection,
+  recipientAddress: PublicKey
+) {
+  try {
+    const walletPublicKey = getWalletPublicKey(wallet);
+    const usdcMint = BIOX_TOKEN_MINT; // Using the USDC devnet
+    
+    // Get associated token account address
+    const recipientTokenAccount = getAssociatedTokenAddressSync(
+      usdcMint,
+      recipientAddress
+    );
+    
+    // Check if account already exists
+    const accountInfo = await connection.getAccountInfo(recipientTokenAccount);
+    
+    if (accountInfo) {
+      return {
+        success: true,
+        tokenAccount: recipientTokenAccount,
+        message: "USDC token account already exists",
+        alreadyExists: true
+      };
+    }
+    
+    // Create the associated token account
+    const instruction = createAssociatedTokenAccountInstruction(
+      walletPublicKey, // payer
+      recipientTokenAccount, // associatedToken
+      recipientAddress, // owner
+      usdcMint // mint
+    );
+    
+    const transaction = new Transaction().add(instruction);
+    const signature = await sendTransactionWithWallet(wallet, transaction, connection);
+    
+    console.log("USDC token account created:", recipientTokenAccount.toString());
+    
+    return {
+      success: true,
+      signature: signature,
+      tokenAccount: recipientTokenAccount,
+      message: "USDC token account created successfully. Use a devnet faucet to get test USDC tokens."
+    };
+    
+  } catch (error: any) {
+    console.error("Error creating USDC account:", error);
+    return {
+      success: false,
+      error: error.message || "Failed to create USDC token account"
+    };
+  }
+}
+
+// Airdrop USDC tokens for testing (devnet only)
+export async function airdropUSDC(
+  wallet: any,
+  connection: Connection,
+  recipientAddress: PublicKey,
+  amount: number // Amount in USDC (e.g., 100 for 100 USDC)
+) {
+  try {
+    const walletPublicKey = getWalletPublicKey(wallet);
+    
+    // Use devnet USDC mint address
+    const usdcMint = BIOX_TOKEN_MINT;
+    
+    // Get or create associated token account for recipient
+    const recipientTokenAccount = getAssociatedTokenAddressSync(
+      usdcMint,
+      recipientAddress
+    );
+    
+    // Check if token account exists
+    const accountInfo = await connection.getAccountInfo(recipientTokenAccount);
+    
+    const instructions = [];
+    
+    // Create token account if it doesn't exist
+    if (!accountInfo) {
+      console.log("Creating USDC token account for:", recipientAddress.toString());
+      instructions.push(
+        createAssociatedTokenAccountInstruction(
+          walletPublicKey, // payer
+          recipientTokenAccount, // associatedToken
+          recipientAddress, // owner
+          usdcMint // mint
+        )
+      );
+    }
+    
+    // For devnet testing, we'll simulate minting by using a faucet-like approach
+    // In a real scenario, you'd need mint authority or use a proper faucet
+    console.log("Note: For devnet USDC, you might need to use the official Solana faucet or request tokens from a devnet faucet");
+    
+    // If this is a custom mint (not the official USDC), we can mint
+    // For official USDC, users need to get tokens from exchanges or faucets
+    const isCustomMint = !usdcMint.equals(new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"));
+    
+    if (isCustomMint) {
+      // Add mint instruction (only works if wallet has mint authority)
+      instructions.push(
+        createMintToInstruction(
+          usdcMint, // mint
+          recipientTokenAccount, // destination
+          walletPublicKey, // authority
+          amount * Math.pow(10, 6) // amount with decimals (USDC has 6 decimals)
+        )
+      );
+    }
+    
+    if (instructions.length > 0) {
+      // Create transaction
+      const transaction = new Transaction().add(...instructions);
+      
+      // Send transaction using helper function
+      const signature = await sendTransactionWithWallet(wallet, transaction, connection);
+      
+      console.log(`USDC token account setup completed for ${recipientAddress.toString()}`);
+      
+      return {
+        success: true,
+        signature: signature,
+        tokenAccount: recipientTokenAccount,
+        message: isCustomMint ? 
+          `Minted ${amount} USDC tokens` : 
+          "USDC token account created. Use a devnet faucet to get test USDC tokens."
+      };
+    } else {
+      return {
+        success: true,
+        tokenAccount: recipientTokenAccount,
+        message: "USDC token account already exists. Use a devnet faucet to get test USDC tokens.",
+        needsFaucet: true
+      };
+    }
+    
+  } catch (error: any) {
+    console.error("Error setting up USDC:", error);
+    return {
+      success: false,
+      error: error.message || "Failed to setup USDC token account"
+    };
+  }
+}
+
+// Function to check if user has a USDC token account and balance
+export async function checkUSDCAccountStatus(
+  connection: Connection,
+  userPublicKey: PublicKey
+) {
+  try {
+    const usdcMint = BIOX_TOKEN_MINT;
+    const tokenAccount = getAssociatedTokenAddressSync(usdcMint, userPublicKey);
+    
+    // Check if account exists
+    const accountInfo = await connection.getAccountInfo(tokenAccount);
+    
+    if (!accountInfo) {
+      return {
+        success: true,
+        exists: false,
+        balance: 0,
+        tokenAccount: tokenAccount,
+        message: "USDC token account does not exist"
+      };
+    }
+    
+    // Get balance
+    try {
+      const balanceInfo = await connection.getTokenAccountBalance(tokenAccount);
+      
+      return {
+        success: true,
+        exists: true,
+        balance: parseFloat(balanceInfo.value.amount) / Math.pow(10, balanceInfo.value.decimals),
+        rawBalance: balanceInfo.value.amount,
+        decimals: balanceInfo.value.decimals,
+        tokenAccount: tokenAccount
+      };
+    } catch (balanceError) {
+      return {
+        success: true,
+        exists: true,
+        balance: 0,
+        tokenAccount: tokenAccount,
+        message: "Account exists but balance could not be determined"
+      };
+    }
+    
+  } catch (error: any) {
+    console.error("Error checking USDC account status:", error);
+    return {
+      success: false,
+      error: error.message || "Failed to check USDC account status"
+    };
+  }
+}
+
+// Updated sendTransactionWithWallet function with better error handling
+async function sendTransactionWithWallet(
+  wallet: any,
+  transaction: Transaction,
+  connection: Connection
+): Promise<string> {
+  try {
+    const walletPublicKey = getWalletPublicKey(wallet);
+    
+    // Set recent blockhash
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = walletPublicKey;
+    
+    console.log("Attempting to send transaction with wallet methods...");
+    
+    // Method 1: Try sendTransaction first (most compatible)
+    if (wallet.sendTransaction) {
+      console.log("Using wallet.sendTransaction");
+      try {
+        const signature = await wallet.sendTransaction(transaction, connection);
+        await connection.confirmTransaction(signature, "confirmed");
+        return signature;
+      } catch (sendError) {
+        console.warn("wallet.sendTransaction failed, trying alternatives:", sendError);
+      }
+    }
+    
+    // Method 2: Try adapter's sendTransaction
+    if (wallet.adapter?.sendTransaction) {
+      console.log("Using wallet.adapter.sendTransaction");
+      try {
+        const signature = await wallet.adapter.sendTransaction(transaction, connection);
+        await connection.confirmTransaction(signature, "confirmed");
+        return signature;
+      } catch (sendError) {
+        console.warn("wallet.adapter.sendTransaction failed, trying alternatives:", sendError);
+      }
+    }
+    
+    // Method 3: Try signTransaction and manual send
+    let signedTransaction;
+    if (wallet.signTransaction) {
+      console.log("Using wallet.signTransaction");
+      try {
+        signedTransaction = await wallet.signTransaction(transaction);
+      } catch (signError) {
+        console.warn("wallet.signTransaction failed:", signError);
+      }
+    } else if (wallet.adapter?.signTransaction) {
+      console.log("Using wallet.adapter.signTransaction");
+      try {
+        signedTransaction = await wallet.adapter.signTransaction(transaction);
+      } catch (signError) {
+        console.warn("wallet.adapter.signTransaction failed:", signError);
+      }
+    }
+    
+    if (signedTransaction) {
+      // Send the signed transaction
+      const signature = await connection.sendRawTransaction(signedTransaction.serialize());
+      await connection.confirmTransaction(signature, "confirmed");
+      return signature;
+    }
+    
+    throw new Error("Wallet does not support any compatible transaction methods. Please try a different wallet like Phantom or Solflare.");
+    
+  } catch (error: any) {
+    console.error("Error sending transaction:", error);
+    
+    // Provide more specific error messages
+    if (error.message?.includes("User rejected")) {
+      throw new Error("Transaction was rejected by user");
+    } else if (error.message?.includes("insufficient funds")) {
+      throw new Error("Insufficient funds for transaction");
+    } else if (error.message?.includes("does not support")) {
+      throw new Error("Please connect a wallet that supports transaction signing (like Phantom or Solflare)");
+    } else if (error.message?.includes("this.emit")) {
+      throw new Error("Wallet connection error. Please disconnect and reconnect your wallet.");
+    }
+    
+    throw error;
   }
 }
 
@@ -1319,304 +1742,332 @@ export async function setupUserTokenAccount(
   }
 }
 
-// Helper function to send transactions with proper wallet handling
-async function sendTransactionWithWallet(
-  wallet: any,
-  transaction: Transaction,
-  connection: Connection
-): Promise<string> {  try {
-    const walletPublicKey = getWalletPublicKey(wallet);
-    
-    // Get recent blockhash
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = walletPublicKey;
-    
-    // Try different wallet methods - check both wallet and wallet.adapter
-    const sendTransaction = wallet.sendTransaction || wallet.adapter?.sendTransaction;
-    const signTransaction = wallet.signTransaction || wallet.adapter?.signTransaction;
-    const signAndSendTransaction = wallet.signAndSendTransaction || wallet.adapter?.signAndSendTransaction;
-    
-    if (sendTransaction) {
-      // Modern wallet adapter approach
-      return await sendTransaction(transaction, connection);
-    } else if (signTransaction) {
-      // Sign and send manually
-      const signedTransaction = await signTransaction(transaction);
-      const signature = await connection.sendRawTransaction(signedTransaction.serialize());
-      
-      // Confirm transaction
-      await connection.confirmTransaction({
-        signature,
-        blockhash,
-        lastValidBlockHeight
-      }, "confirmed");
-      
-      return signature;
-    } else if (signAndSendTransaction) {
-      // Legacy wallet approach
-      const result = await signAndSendTransaction(transaction);
-      return typeof result === 'string' ? result : result.signature;
-    } else {
-      throw new Error("Wallet does not support transaction sending. Please make sure your wallet is properly connected.");
-    }
-  } catch (error: any) {
-    console.error("Transaction sending error:", error);
-    throw new Error(`Failed to send transaction: ${error.message || error}`);
-  }
-}
-
-// Initialize required token accounts for a paper
-export async function initializeRequiredTokenAccounts(
-  program: anchor.Program<BioxResearch>,
-  wallet: any,
-  paperId: number
+// Get user's token balance
+export async function getUserTokenBalance(
+  wallet: { publicKey?: PublicKey },
+  tokenMint: PublicKey = getCurrentTokenMint()
 ) {
   try {
-    const connection = program.provider.connection;
-    const walletPublicKey = getWalletPublicKey(wallet);
-    const paperIdBN = new anchor.BN(paperId);
+    const connection = new Connection(
+      process.env.NEXT_PUBLIC_RPC_URL || "http://127.0.0.1:8899",
+      "confirmed"
+    );
     
-    // Get PDAs
-    const [paperTokenAccountPda] = getPaperTokenAccountPda(paperIdBN);
-    const [platformVaultPda] = getPlatformVaultPda();
-    
-    console.log("Initializing token accounts for paper:", {
-      paperId,
-      paperTokenAccountPda: paperTokenAccountPda.toString(),
-      platformVaultPda: platformVaultPda.toString()
-    });
-
-    const instructions = [];
-    
-    // Check and create paper token account
-    const paperTokenAccountInfo = await connection.getAccountInfo(paperTokenAccountPda);
-    if (!paperTokenAccountInfo) {
-      console.log("Creating paper token account...");
-      
-      // Create the token account manually since it's a PDA
-      const createAccountIx = SystemProgram.createAccount({
-        fromPubkey: walletPublicKey,
-        newAccountPubkey: paperTokenAccountPda,
-        space: 165, // Token account size
-        lamports: await connection.getMinimumBalanceForRentExemption(165),
-        programId: TOKEN_PROGRAM_ID,
-      });
-      
-      const initAccountIx = createInitializeAccountInstruction(
-        paperTokenAccountPda,
-        BIOX_TOKEN_MINT,
-        paperTokenAccountPda, // PDA owns itself
-        TOKEN_PROGRAM_ID
-      );
-      
-      instructions.push(createAccountIx, initAccountIx);
+    if (!wallet.publicKey) {
+      return {
+        success: true,
+        balance: 0,
+        rawBalance: "0",
+        decimals: 9 // BIOX token has 9 decimals
+      };
     }
     
-    // Check and create platform vault
-    const platformVaultInfo = await connection.getAccountInfo(platformVaultPda);
-    if (!platformVaultInfo) {
-      console.log("Creating platform vault...");
-      
-      const createVaultIx = SystemProgram.createAccount({
-        fromPubkey: walletPublicKey,
-        newAccountPubkey: platformVaultPda,
-        space: 165, // Token account size
-        lamports: await connection.getMinimumBalanceForRentExemption(165),
-        programId: TOKEN_PROGRAM_ID,
-      });
-      
-      const initVaultIx = createInitializeAccountInstruction(
-        platformVaultPda,
-        BIOX_TOKEN_MINT,
-        platformVaultPda, // PDA owns itself
-        TOKEN_PROGRAM_ID
-      );
-      
-      instructions.push(createVaultIx, initVaultIx);
+    // Get associated token account address
+    const tokenAccount = getAssociatedTokenAddressSync(
+      tokenMint,
+      wallet.publicKey
+    );
+    
+    // Get account info
+    const accountInfo = await connection.getTokenAccountBalance(tokenAccount);
+    
+    if (accountInfo && accountInfo.value) {
+      return {
+        success: true,
+        balance: parseFloat(accountInfo.value.amount) / Math.pow(10, accountInfo.value.decimals),
+        rawBalance: accountInfo.value.amount,
+        decimals: accountInfo.value.decimals
+      };
+    } else {
+      return {
+        success: true,
+        balance: 0,
+        rawBalance: "0",
+        decimals: 9
+      };
     }
-    
-    // Execute instructions if any
-    if (instructions.length > 0) {
-      const transaction = new Transaction().add(...instructions);
-      const signature = await sendTransactionWithWallet(wallet, transaction, connection);
-      
-      console.log("Token accounts initialized:", signature);
-      
-      // Wait for confirmation
-      await connection.confirmTransaction(signature, "confirmed");
-      
-      return { success: true, signature };
-    }
-    
-    return { success: true, message: "Token accounts already exist" };
-    
   } catch (error) {
-    console.error("Error initializing token accounts:", error);
+    console.error("Error getting token balance:", error);
+    
+    // If account doesn't exist, return 0 balance
+    if (error instanceof Error && error.message.includes("could not find account")) {
+      return {
+        success: true,
+        balance: 0,
+        rawBalance: "0",
+        decimals: 9
+      };
+    }
+    
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Failed to initialize token accounts"
+      error: error instanceof Error ? error.message : "Failed to get token balance",
+      balance: 0,
+      rawBalance: "0",
+      decimals: 9
     };
   }
 }
 
-// New fund paper function with better error handling and token checks
-export async function fundPaperWithTokens(
+// Get user's SOL balance
+export async function getUserSOLBalance(wallet: any) {
+  try {
+    const connection = new Connection(
+      process.env.NEXT_PUBLIC_RPC_URL || "http://127.0.0.1:8899",
+      "confirmed"
+    );
+    
+    const walletPublicKey = getWalletPublicKey(wallet);
+    const balance = await connection.getBalance(walletPublicKey);
+    
+    return {
+      success: true,
+      balance: balance / LAMPORTS_PER_SOL,
+      rawBalance: balance.toString()
+    };
+  } catch (error) {
+    console.error("Error getting SOL balance:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Failed to get SOL balance",
+      balance: 0,
+      rawBalance: "0"
+    };
+  }
+}
+
+// Add this to your solana.ts
+export async function setupTestingEnvironment(wallet: any) {
+  try {
+    const connection = new Connection(
+      process.env.NEXT_PUBLIC_RPC_URL || "http://127.0.0.1:8899",
+      "confirmed"
+    );
+    
+    const userPublicKey = getWalletPublicKey(wallet);
+    
+    // For local testing, you can request an airdrop
+    if (process.env.NEXT_PUBLIC_RPC_URL?.includes("localhost")) {
+      try {
+        const airdropSignature = await connection.requestAirdrop(
+          userPublicKey,
+          2 * LAMPORTS_PER_SOL
+        );
+        await connection.confirmTransaction(airdropSignature);
+        console.log("SOL airdrop completed");
+      } catch (error) {
+        console.log("Airdrop failed (might already have enough SOL)");
+      }
+    }
+    
+    // Create token account if needed
+    const tokenAccount = getAssociatedTokenAddressSync(
+      BIOX_TOKEN_MINT,
+      userPublicKey
+    );
+    
+    const accountInfo = await connection.getAccountInfo(tokenAccount);
+    if (!accountInfo) {
+      const createATAIx = createAssociatedTokenAccountInstruction(
+        userPublicKey,
+        tokenAccount,
+        userPublicKey,
+        BIOX_TOKEN_MINT
+      );
+      
+      const transaction = new Transaction().add(createATAIx);
+      await sendTransactionWithWallet(wallet, transaction, connection);
+      console.log("Token account created");
+    }
+    
+    return {
+      success: true,
+      tokenAccount: tokenAccount,
+      message: "Testing environment setup complete"
+    };
+    
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Setup failed"
+    };
+  }
+}
+
+// Add this enhanced funding function that ensures token accounts exist
+export async function fundPaperWithTokenAccountCreation(
   program: anchor.Program<BioxResearch>,
   wallet: any,
   paperId: number,
-  amountInTokens: number
+  amount: number,
+  tokenMint: PublicKey = BIOX_TOKEN_MINT
 ) {
   try {
-    const walletPublicKey = getWalletPublicKey(wallet);
-    const paperIdBN = new anchor.BN(paperId);
+    const connection = program.provider.connection;
+    const funderPublicKey = getWalletPublicKey(wallet);
     
-    // Convert to smallest units (assuming 6 decimals like USDC)
-    const amountInSmallestUnits = Math.floor(amountInTokens * 1_000_000);
-    const amountBN = new anchor.BN(amountInSmallestUnits);
-    
-    console.log("Funding paper with details:", {
-      paperId,
-      amountInTokens,
-      amountInSmallestUnits,
-      funder: walletPublicKey.toString()
-    });
-
-    // Step 1: Ensure user has token account
-    const funderTokenAccount = getAssociatedTokenAddressSync(
-      BIOX_TOKEN_MINT,
-      walletPublicKey
+    // 1. Ensure funder has a token account for the specified mint
+    console.log("Ensuring funder token account exists...");
+    const funderTokenAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      wallet,
+      tokenMint,
+      funderPublicKey
     );
     
-    // Check if user token account exists and has balance
-    const connection = program.provider.connection;
-    const funderAccountInfo = await connection.getAccountInfo(funderTokenAccount);
-    if (!funderAccountInfo) {
-      return {
-        success: false,
-        error: "You don't have a token account for this token. Please create one first or get some test tokens."
-      };
-    }
-
-    // Step 2: Initialize required PDA token accounts
-    const initResult = await initializeRequiredTokenAccounts(program, wallet, paperId);
-    if (!initResult.success) {
-      return {
-        success: false,
-        error: `Failed to initialize token accounts: ${initResult.error}`
-      };
-    }
-
-    // Step 3: Call the fund_paper instruction
-    console.log("Calling fund_paper instruction...");
+    console.log("Funder token account:", funderTokenAccount.address.toString());
     
-    const txBuilder = program.methods
-      .fundPaper(paperIdBN, amountBN)
+    // 2. Check funder's token balance
+    const funderBalance = await connection.getTokenAccountBalance(funderTokenAccount.address);
+    const requiredAmount = amount * Math.pow(10, 6); // Assuming 6 decimals
+    
+    if (funderBalance.value.uiAmount === null || funderBalance.value.uiAmount < amount) {
+      return {
+        success: false,
+        error: `Insufficient token balance. You have ${funderBalance.value.uiAmount || 0} tokens, but need ${amount} tokens.`,
+        needsTokens: true
+      };
+    }
+    
+    // 3. Get all required PDAs as per the contract
+    const paperIdBN = new anchor.BN(paperId);
+    const [paperPda] = getPaperPda(paperIdBN);
+    const [paperTokenAccountPda] = getPaperTokenAccountPda(paperIdBN);
+    const [platformTokenAccountPda] = getPlatformVaultPda();
+    const [fundingPda] = getFundingPda(paperIdBN, funderPublicKey);
+    const [programStatePda] = getProgramStatePda();
+    
+    console.log("PDAs:", {
+      paperPda: paperPda.toString(),
+      paperTokenAccountPda: paperTokenAccountPda.toString(),
+      platformTokenAccountPda: platformTokenAccountPda.toString(),
+      fundingPda: fundingPda.toString(),
+      funderTokenAccount: funderTokenAccount.toString()
+    });
+    
+    // 4. Check if paper exists and is published
+    const paper = await program.account.researchPaper.fetch(paperPda);
+    if (!paper.isPublished) {
+      return {
+        success: false,
+        error: "Paper must be published before it can be funded"
+      };
+    }
+    
+    // 5. Execute funding transaction with exact account structure from IDL
+    console.log("Executing funding transaction...");
+    const tx = await program.methods
+      .fundPaper(paperIdBN, new anchor.BN(requiredAmount))
       .accounts({
-        funder: walletPublicKey,
-        funderTokenAccount: funderTokenAccount,
-        // Other accounts are auto-derived by Anchor based on the IDL
-      });
-
-    const signature = await txBuilder.rpc();
-    console.log("Fund paper transaction sent:", signature);
-
-    // Wait for confirmation
-    await program.provider.connection.confirmTransaction(signature, "confirmed");
-    console.log("Fund paper transaction confirmed");
-
+        funder: funderPublicKey,
+        funderTokenAccount: funderTokenAccount.address,
+      })
+      .rpc();
+    
+    console.log("Funding transaction signature:", tx);
+    
     return {
       success: true,
-      txHash: signature,
-      message: `Successfully funded ${amountInTokens} tokens to paper #${paperId}`
+      signature: tx,
+      message: `Successfully funded paper with ${amount} tokens!`
     };
-
-  } catch (error) {
-    console.error("Error funding paper:", error);
     
-    if (error instanceof anchor.AnchorError) {
-      console.error("Anchor Error Details:", {
-        code: error.error.errorCode.number,
-        message: error.error.errorMessage,
-        logs: error.logs
-      });
-      
-      // Handle specific contract errors
-      switch (error.error.errorCode.number) {
-        case 6007:
-          return { success: false, error: "Paper is not published yet" };
-        case 6008:
-          return { success: false, error: "Funding deadline has passed" };
-        case 6009:
-          return { success: false, error: "Invalid funding amount" };
-        case 6013:
-          return { success: false, error: "Program is currently paused" };
-        default:
-          return { success: false, error: error.error.errorMessage };
+  } catch (error: any) {
+    console.error("Funding error:", error);
+    
+    let errorMessage = "Failed to fund paper";
+    
+    if (error.message?.includes("InvalidMint")) {
+      errorMessage = "Invalid token mint. Please create a valid token mint first.";
+    } else if (error.message?.includes("TokenAccountNotFound")) {
+      errorMessage = "Token account not found. Please ensure all token accounts are created.";
+    } else if (error.message?.includes("InsufficientFunds")) {
+      errorMessage = "Insufficient token balance or SOL for transaction fees.";
+    } else if (error.logs) {
+      const logs = error.logs.join(' ');
+      if (logs.includes("Invalid Mint")) {
+        errorMessage = "The token mint address is invalid or doesn't exist on this network.";
       }
     }
     
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Unknown error occurred"
+      error: errorMessage,
+      logs: error.logs
     };
   }
 }
 
-// New user token account creation function
-export async function createUserTokenAccount(
-  wallet: any,
-  tokenMint: PublicKey = BIOX_TOKEN_MINT
+// Helper function to get or create associated token account
+async function getOrCreateAssociatedTokenAccount(
+  connection: Connection,
+  payer: any,
+  mint: PublicKey,
+  owner: PublicKey
 ) {
   try {
-    const connection = new Connection(
-      process.env.NEXT_PUBLIC_RPC_URL || "https://api.devnet.solana.com",
-      "confirmed"
+    // Calculate the associated token account address
+    const associatedTokenAddress = await getAssociatedTokenAddress(
+      mint,
+      owner,
+      false, // allowOwnerOffCurve
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
     );
     
-    const walletPublicKey = getWalletPublicKey(wallet);
+    console.log("Associated token address:", associatedTokenAddress.toString());
     
-    // Get associated token account address
-    const tokenAccount = getAssociatedTokenAddressSync(
-      tokenMint,
-      walletPublicKey
-    );
+    // Check if account exists
+    const accountInfo = await connection.getAccountInfo(associatedTokenAddress);
     
-    // Check if it already exists
-    const accountInfo = await connection.getAccountInfo(tokenAccount);
     if (accountInfo) {
+      console.log("Token account already exists");
+      // Account exists, return it
       return {
-        success: true,
-        tokenAccount: tokenAccount.toString(),
-        message: "Token account already exists"
+        address: associatedTokenAddress,
+        mint,
+        owner,
+        amount: BigInt(0), // We'll get the actual amount separately
       };
     }
     
-    // Create the associated token account
-    const instruction = createAssociatedTokenAccountInstruction(
-      walletPublicKey, // payer
-      tokenAccount,    // associatedToken
-      walletPublicKey, // owner
-      tokenMint        // mint
+    console.log("Creating associated token account...");
+    
+    // Account doesn't exist, create it
+    const transaction = new Transaction().add(
+      createAssociatedTokenAccountInstruction(
+        owner, // payer
+        associatedTokenAddress, // associatedToken
+        owner, // owner
+        mint, // mint
+        TOKEN_PROGRAM_ID,
+        ASSOCIATED_TOKEN_PROGRAM_ID
+      )
     );
     
-    const transaction = new Transaction().add(instruction);
-    const signature = await sendTransactionWithWallet(wallet, transaction, connection);
+    // Get recent blockhash
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = owner;
     
-    console.log("User token account created:", signature);
+    // Send transaction
+    const signature = await sendTransactionWithWallet(payer, transaction, connection);
+    
+    console.log("Token account created. Signature:", signature);
+    
+    // Wait for confirmation
+    await connection.confirmTransaction(signature, 'confirmed');
     
     return {
-      success: true,
-      tokenAccount: tokenAccount.toString(),
-      signature
+      address: associatedTokenAddress,
+      mint,
+      owner,
+      amount: BigInt(0),
     };
     
-  } catch (error) {
-    console.error("Error creating user token account:", error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : "Failed to create token account"
-    };
+  } catch (error: any) {
+    console.error("Error creating token account:", error);
+    throw new Error(`Failed to create token account: ${error.message}`);
   }
 }
 

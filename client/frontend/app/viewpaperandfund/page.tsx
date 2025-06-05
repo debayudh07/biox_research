@@ -26,6 +26,9 @@ import {
   votePaperWorkflow,
   getConnectionInfo,
   fundPaperWorkflow,
+  getUserTokenBalance,
+  getCurrentTokenMint,
+  BIOX_TOKEN_MINT,
 } from "@/lib/solana"
 import {
   ExternalLink,
@@ -40,10 +43,8 @@ import {
   Sparkles,
   Search,
   RefreshCw,
+  Coins,
 } from "lucide-react"
-
-// BioX Research Platform Token Mint
-const TOKEN_MINT = new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU")
 
 interface Paper {
   id: string
@@ -82,7 +83,8 @@ interface PreviewState {
   contentType: "pdf" | "text" | "json" | "unknown"
 }
 
-export default function ViewAndFundPapersPage() {  const { connected, wallet, publicKey } = useWallet()
+export default function ViewAndFundPapersPage() {
+  const { connected, wallet, publicKey } = useWallet()
   const [papers, setPapers] = useState<Paper[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string>("")
@@ -93,6 +95,8 @@ export default function ViewAndFundPapersPage() {  const { connected, wallet, pu
   const [searchTerm, setSearchTerm] = useState("")
   const [filterStatus, setFilterStatus] = useState("all")
   const [sortBy, setSortBy] = useState("newest")
+  const [userTokenBalance, setUserTokenBalance] = useState<number>(0)
+  const [isCheckingBalance, setIsCheckingBalance] = useState(false)
   
   const loadPapers = useCallback(async () => {
     try {
@@ -131,12 +135,46 @@ export default function ViewAndFundPapersPage() {  const { connected, wallet, pu
       setError(err instanceof Error ? err.message : "Unknown error occurred")
     } finally {
       setIsLoading(false)
-    }  }, [wallet, connected, publicKey])
+    }
+  }, [wallet, connected, publicKey])
+
+  // Check user's token balance
+  const checkUserBalance = useCallback(async () => {
+    if (!connected || !publicKey) {
+      setUserTokenBalance(0)
+      return
+    }
+
+    try {
+      setIsCheckingBalance(true)
+      const balanceResult = await getUserTokenBalance(
+        { publicKey },
+        getCurrentTokenMint()
+      )
+
+      if (balanceResult.success) {
+        setUserTokenBalance(balanceResult.balance)
+      } else {
+        console.error("Failed to get token balance:", balanceResult.error)
+        setUserTokenBalance(0)
+      }
+    } catch (error) {
+      console.error("Error checking balance:", error)
+      setUserTokenBalance(0)
+    } finally {
+      setIsCheckingBalance(false)
+    }
+  }, [connected, publicKey])
 
   // Load papers on component mount and when wallet connects
   useEffect(() => {
     loadPapers()
   }, [loadPapers])
+
+  // Check balance when wallet connects
+  useEffect(() => {
+    checkUserBalance()
+  }, [checkUserBalance])
 
   const checkVotingStatus = async (paperId: string) => {
     if (!connected || !publicKey || !wallet) return
@@ -205,20 +243,41 @@ export default function ViewAndFundPapersPage() {  const { connected, wallet, pu
       setError("")
 
       const amountInTokens = Number.parseFloat(amount)
-      console.log(`Funding paper ${paperId} with ${amountInTokens} tokens`)
+      console.log(`Funding paper ${paperId} with ${amountInTokens} BIOX tokens`)
 
-      const userTokenAccount = getAssociatedTokenAddressSync(TOKEN_MINT, publicKey)
+      // Check if user has sufficient balance
+      if (amountInTokens > userTokenBalance) {
+        setError(`Insufficient BIOX token balance. You have ${userTokenBalance.toFixed(2)} BIOX, but need ${amountInTokens} BIOX.`)
+        return
+      }
 
-      const result = await fundPaperWorkflow(wallet, Number.parseInt(paperId), amountInTokens, userTokenAccount)
+      // Use the enhanced funding workflow that handles token account creation
+      const result = await fundPaperWorkflow(
+        wallet, 
+        Number.parseInt(paperId), 
+        amountInTokens,
+        getCurrentTokenMint() // Use the current BIOX token mint
+      )
 
       if (result.success) {
-        console.log("Funding successful:", "txHash" in result ? result.txHash : "Transaction completed")
+        console.log("Funding successful:", 'signature' in result ? result.signature : "Transaction completed")
+        
+        // Refresh papers and balance
         await loadPapers()
+        await checkUserBalance()
+        
+        // Clear the form
         setFundingStates((prev) => ({
           ...prev,
           [paperId]: { amount: "", isLoading: false },
         }))
+        
         setError("")
+        
+        // Show success message
+        const successMessage = `Successfully funded ${amountInTokens} BIOX tokens to paper #${paperId}!`
+        console.log(successMessage)
+        
         // Show success animation
         const successElement = document.getElementById(`success-${paperId}`)
         if (successElement) {
@@ -226,7 +285,18 @@ export default function ViewAndFundPapersPage() {  const { connected, wallet, pu
           setTimeout(() => successElement.classList.remove("animate-pulse"), 2000)
         }
       } else {
-        setError(`Funding failed: ${result.error}`)
+        let errorMessage = `Funding failed: ${result.error}`
+        
+        // Handle specific error cases
+        if (result.error?.includes("insufficient")) {
+          errorMessage = "Insufficient BIOX token balance or SOL for transaction fees."
+        } else if (result.error?.includes("token account")) {
+          errorMessage = "Token account setup failed. Please ensure you have set up your BIOX token account."
+        } else if (result.error?.includes("not published")) {
+          errorMessage = "This paper must be published before it can be funded."
+        }
+        
+        setError(errorMessage)
       }
     } catch (err) {
       console.error("Error funding paper:", err)
@@ -252,18 +322,40 @@ export default function ViewAndFundPapersPage() {  const { connected, wallet, pu
       }))
       setError("")
 
-      const userTokenAccount = getAssociatedTokenAddressSync(TOKEN_MINT, publicKey)
-
       console.log(`Voting on paper ${paperId}: ${isUpvote ? "upvote" : "downvote"}`)
 
-      const result = await votePaperWorkflow(wallet, Number.parseInt(paperId), isUpvote, userTokenAccount)
+      // Use the voting workflow which handles token account creation
+      const result = await votePaperWorkflow(
+        wallet, 
+        Number.parseInt(paperId), 
+        isUpvote
+        // No need to pass voterTokenAccount - the workflow will handle it
+      )
       
       if (result.success) {
-        console.log("Voting successful:", "txHash" in result ? result.txHash : "Transaction completed")
+        console.log("Voting successful:", 'txHash' in result ? result.txHash : "Transaction completed")
+        
+        // Refresh papers and voting status
         await loadPapers()
+        await checkVotingStatus(paperId)
+        
         setError("")
+        
+        const voteType = isUpvote ? "upvote" : "downvote"
+        console.log(`Successfully ${voteType}d paper #${paperId}!`)
       } else {
-        setError(`Voting failed: ${result.error}`)
+        let errorMessage = `Voting failed: ${result.error}`
+        
+        // Handle specific error cases
+        if (result.error?.includes("already voted")) {
+          errorMessage = "You have already voted on this paper. Each user can only vote once per paper."
+        } else if (result.error?.includes("not published")) {
+          errorMessage = "This paper must be published before it can receive votes."
+        } else if (result.error?.includes("token account")) {
+          errorMessage = "Token account setup failed. Please ensure you have set up your BIOX token account."
+        }
+        
+        setError(errorMessage)
       }
     } catch (err) {
       console.error("Error voting on paper:", err)
@@ -273,11 +365,12 @@ export default function ViewAndFundPapersPage() {  const { connected, wallet, pu
         ...prev,
         [paperId]: { isLoading: false },
       }))
-    }  }
+    }
+  }
 
   const formatAmount = (amount: string) => {
     const num = Number.parseInt(amount)
-    return (num / Math.pow(10, 6)).toFixed(2)
+    return (num / Math.pow(10, 9)).toFixed(2) // BIOX token has 9 decimals
   }
 
   const getStatusBadge = (status: Record<string, unknown>) => {
@@ -614,6 +707,40 @@ export default function ViewAndFundPapersPage() {  const { connected, wallet, pu
             </div>
           </div>
 
+          {/* User Balance Display */}
+          <div className="max-w-md mx-auto mb-8">
+            <Card className="border-emerald-200 bg-gradient-to-r from-emerald-50 to-green-50">
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-gradient-to-br from-emerald-400 to-green-500 rounded-full flex items-center justify-center">
+                      <Coins className="h-5 w-5 text-white" />
+                    </div>
+                    <div>
+                      <p className="text-sm text-slate-600">Your BIOX Balance</p>
+                      <p className="text-xl font-bold text-emerald-600">
+                        {isCheckingBalance ? (
+                          <div className="w-4 h-4 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin inline-block"></div>
+                        ) : (
+                          `${userTokenBalance.toFixed(2)} BIOX`
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    onClick={checkUserBalance}
+                    disabled={isCheckingBalance}
+                    variant="outline"
+                    size="sm"
+                    className="border-emerald-200 hover:bg-emerald-50"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${isCheckingBalance ? "animate-spin" : ""}`} />
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
           {/* Search and Filter Controls */}
           <div className="max-w-4xl mx-auto mb-8">
             <Card className="border-0 shadow-lg bg-white/80 backdrop-blur-sm">
@@ -749,245 +876,238 @@ export default function ViewAndFundPapersPage() {  const { connected, wallet, pu
             {filteredAndSortedPapers.map((paper) => {
               const fundingProgress = (Number.parseInt(paper.currentFunding) / Number.parseInt(paper.fundingGoal)) * 100
               const isFullyFunded = fundingProgress >= 100
+              const statusKey = Object.keys(paper.status)[0]
 
               return (
                 <Card
                   key={paper.id}
+                  id={`success-${paper.id}`}
                   className="group border border-emerald-200/50 shadow-lg hover:shadow-xl transition-all duration-300 bg-white/95 backdrop-blur-sm hover:scale-[1.01] overflow-hidden relative rounded-xl"
                 >
                   {/* Gradient overlay */}
                   <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/3 to-green-500/3 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
 
-                  <CardContent className="relative p-6 space-y-4">
-                    {/* Voting Section - Top */}
-                    <div className="space-y-3">
-                      {/* Upvote Progress */}
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 bg-emerald-100 rounded-lg flex items-center justify-center flex-shrink-0">
-                          <ThumbsUp className="h-4 w-4 text-emerald-600" />
-                        </div>
-                        <div className="flex-1">
-                          <div className="flex justify-between items-center mb-1">
-                            <span className="text-sm text-slate-600">75% Upvoted</span>
-                          </div>
-                          <div className="w-full bg-emerald-100 rounded-full h-2">
-                            <div
-                              className="bg-gradient-to-r from-emerald-400 to-emerald-500 h-2 rounded-full"
-                              style={{ width: "75%" }}
-                            ></div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Downvote Progress */}
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 bg-emerald-100 rounded-lg flex items-center justify-center flex-shrink-0">
-                          <ThumbsDown className="h-4 w-4 text-emerald-600" />
-                        </div>
-                        <div className="flex-1">
-                          <div className="flex justify-between items-center mb-1">
-                            <span className="text-sm text-slate-600">25% Downvoted</span>
-                          </div>
-                          <div className="w-full bg-emerald-100 rounded-full h-2">
-                            <div
-                              className="bg-gradient-to-r from-emerald-400 to-emerald-500 h-2 rounded-full"
-                              style={{ width: "25%" }}
-                            ></div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Paper Title */}
-                    <div>
-                      <h3 className="text-xl font-bold text-emerald-600 leading-tight mb-2 group-hover:text-emerald-700 transition-colors">
+                  <CardHeader className="relative pb-4">
+                    <div className="flex items-start justify-between mb-2">
+                      <h3 className="text-lg font-bold text-emerald-600 leading-tight group-hover:text-emerald-700 transition-colors flex-1 mr-2">
                         {paper.title}
                       </h3>
+                      {getStatusBadge(paper.status)}
                     </div>
-
-                    {/* Abstract */}
-                    <div>
-                      <p className="text-slate-600 text-sm leading-relaxed line-clamp-3">{paper.abstractText}</p>
-                    </div>
-
-                    {/* Author and Publication Info */}
-                    <div className="flex items-center gap-2 text-sm text-slate-500">
+                    <p className="text-slate-600 text-sm leading-relaxed line-clamp-3">{paper.abstractText}</p>
+                    <div className="flex items-center gap-2 text-sm text-slate-500 mt-2">
                       <span>By {paper.authors.join(", ")}</span>
-                      <span>•</span>
-                      <span>Published 2 days ago</span>
                     </div>
+                  </CardHeader>
 
-                    {/* Bottom Section - Funding and Actions */}
-                    <div className="flex items-center justify-between pt-2">
-                      <div>
-                        <span className="text-2xl font-bold text-emerald-600">
-                          ${formatAmount(paper.currentFunding)}
+                  <CardContent className="relative space-y-4">
+                    {/* Funding Progress */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-slate-600">Funding Progress</span>
+                        <span className="font-medium text-emerald-600">
+                          {Math.min(100, fundingProgress).toFixed(1)}%
                         </span>
-                        <span className="text-sm text-slate-500 ml-1">funded</span>
                       </div>
-
-                      <div className="flex gap-2">
-                        <Dialog
-                          open={previewStates[paper.id]?.isOpen || false}
-                          onOpenChange={(open: boolean) => {
-                            if (!open) {
-                              closePreview(paper.id)
-                            }
-                          }}
-                        >
-                          <DialogTrigger asChild>
-                            <Button
-                              onClick={() => handlePreviewPaper(paper.id, paper.ipfsHash)}
-                              className="bg-white border border-emerald-200 text-emerald-600 hover:bg-emerald-50 hover:border-emerald-300 transition-all duration-200 px-6"
-                            >
-                              View Paper
-                            </Button>
-                          </DialogTrigger>
-                          <DialogContent className="max-w-4xl max-h-[80vh] border-0 shadow-2xl bg-white/95 backdrop-blur-sm">
-                            <DialogHeader>
-                              <DialogTitle className="flex items-center gap-3 text-xl">
-                                <div className="w-8 h-8 bg-gradient-to-br from-emerald-400 to-green-500 rounded-lg flex items-center justify-center">
-                                  <FileText className="h-4 w-4 text-white" />
-                                </div>
-                                <span className="bg-gradient-to-r from-emerald-600 to-green-600 bg-clip-text text-transparent">
-                                  {paper.title}
-                                </span>
-                              </DialogTitle>
-                              <DialogDescription className="text-slate-600">
-                                Paper #{paper.id} by {paper.authors.join(", ")}
-                              </DialogDescription>
-                            </DialogHeader>
-                            {previewStates[paper.id] && renderPreviewContent(paper.id, previewStates[paper.id])}
-                            <div className="flex justify-between items-center pt-6 border-t border-emerald-100">
-                              <Badge
-                                variant="outline"
-                                className="text-xs bg-emerald-50 border-emerald-200 text-emerald-700"
-                              >
-                                IPFS: {paper.ipfsHash.substring(0, 12)}...
-                              </Badge>
-                              <div className="flex gap-3">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => window.open(`https://ipfs.io/ipfs/${paper.ipfsHash}`, "_blank")}
-                                  className="border-emerald-200 hover:bg-emerald-50"
-                                >
-                                  <ExternalLink className="h-4 w-4 mr-2" />
-                                  Open in New Tab
-                                </Button>
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => {
-                                    const link = document.createElement("a")
-                                    link.href = `https://ipfs.io/ipfs/${paper.ipfsHash}`
-                                    link.download = `${paper.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}.pdf`
-                                    link.click()
-                                  }}
-                                  className="border-emerald-200 hover:bg-emerald-50"
-                                >
-                                  <Download className="h-4 w-4 mr-2" />
-                                  Download
-                                </Button>
-                              </div>
-                            </div>
-                          </DialogContent>
-                        </Dialog>
+                      <Progress value={Math.min(100, fundingProgress)} className="h-2 bg-emerald-100" />
+                      <div className="flex justify-between text-xs text-slate-500">
+                        <span>
+                          {formatAmount(paper.currentFunding)} / {formatAmount(paper.fundingGoal)} BIOX
+                        </span>
+                        {isFullyFunded && (
+                          <Badge className="bg-gradient-to-r from-emerald-500 to-green-500 text-white border-0 text-xs">
+                            🎉 Fully Funded!
+                          </Badge>
+                        )}
                       </div>
                     </div>
 
-                    {/* Expandable Funding Section - Hidden by default, shows on hover or click */}
-                    <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-300 space-y-3 pt-4 border-t border-emerald-100">
-                      {/* Funding Progress */}
-                      <div className="space-y-2">
-                        <div className="flex justify-between text-sm">
-                          <span className="text-slate-600">Funding Progress</span>
-                          <span className="font-medium text-emerald-600">
-                            {Math.min(100, fundingProgress).toFixed(1)}%
-                          </span>
-                        </div>
-                        <Progress value={Math.min(100, fundingProgress)} className="h-2 bg-emerald-100" />
-                        <div className="flex justify-between text-xs text-slate-500">
-                          <span>
-                            {formatAmount(paper.currentFunding)} / {formatAmount(paper.fundingGoal)} Tokens
-                          </span>
-                          {isFullyFunded && (
-                            <Badge className="bg-gradient-to-r from-emerald-500 to-green-500 text-white border-0 text-xs">
-                              🎉 Fully Funded!
-                            </Badge>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Funding Input */}
-                      <div className="flex gap-2">
-                        <Input
-                          type="number"
-                          placeholder="Amount"
-                          step="0.01"
-                          min="0"
-                          value={fundingStates[paper.id]?.amount || ""}
-                          onChange={(e) =>
-                            setFundingStates((prev) => ({
-                              ...prev,
-                              [paper.id]: { ...prev[paper.id], amount: e.target.value },
-                            }))
+                    {/* Action Buttons */}
+                    <div className="flex gap-2">
+                      <Dialog
+                        open={previewStates[paper.id]?.isOpen || false}
+                        onOpenChange={(open: boolean) => {
+                          if (!open) {
+                            closePreview(paper.id)
                           }
-                          disabled={fundingStates[paper.id]?.isLoading}
-                          className="flex-1 border-emerald-200 focus:border-emerald-400 focus:ring-emerald-400/20 text-sm"
-                        />
+                        }}
+                      >
+                        <DialogTrigger asChild>
+                          <Button
+                            onClick={() => handlePreviewPaper(paper.id, paper.ipfsHash)}
+                            variant="outline"
+                            size="sm"
+                            className="flex-1 border-emerald-200 text-emerald-600 hover:bg-emerald-50 hover:border-emerald-300 transition-all duration-200"
+                          >
+                            <FileText className="h-4 w-4 mr-2" />
+                            View Paper
+                          </Button>
+                        </DialogTrigger>
+                        <DialogContent className="max-w-4xl max-h-[80vh] border-0 shadow-2xl bg-white/95 backdrop-blur-sm">
+                          <DialogHeader>
+                            <DialogTitle className="flex items-center gap-3 text-xl">
+                              <div className="w-8 h-8 bg-gradient-to-br from-emerald-400 to-green-500 rounded-lg flex items-center justify-center">
+                                <FileText className="h-4 w-4 text-white" />
+                              </div>
+                              <span className="bg-gradient-to-r from-emerald-600 to-green-600 bg-clip-text text-transparent">
+                                {paper.title}
+                              </span>
+                            </DialogTitle>
+                            <DialogDescription className="text-slate-600">
+                              Paper #{paper.id} by {paper.authors.join(", ")}
+                            </DialogDescription>
+                          </DialogHeader>
+                          {previewStates[paper.id] && renderPreviewContent(paper.id, previewStates[paper.id])}
+                          <div className="flex justify-between items-center pt-6 border-t border-emerald-100">
+                            <Badge
+                              variant="outline"
+                              className="text-xs bg-emerald-50 border-emerald-200 text-emerald-700"
+                            >
+                              IPFS: {paper.ipfsHash.substring(0, 12)}...
+                            </Badge>
+                            <div className="flex gap-3">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => window.open(`https://ipfs.io/ipfs/${paper.ipfsHash}`, "_blank")}
+                                className="border-emerald-200 hover:bg-emerald-50"
+                              >
+                                <ExternalLink className="h-4 w-4 mr-2" />
+                                Open in New Tab
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  const link = document.createElement("a")
+                                  link.href = `https://ipfs.io/ipfs/${paper.ipfsHash}`
+                                  link.download = `${paper.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}.pdf`
+                                  link.click()
+                                }}
+                                className="border-emerald-200 hover:bg-emerald-50"
+                              >
+                                <Download className="h-4 w-4 mr-2" />
+                                Download
+                              </Button>
+                            </div>
+                          </div>
+                        </DialogContent>
+                      </Dialog>
+                    </div>
+
+                    {/* Funding Section - Only show for published papers */}
+                    {statusKey === 'published' && !isFullyFunded && (
+                      <div className="space-y-3 pt-3 border-t border-emerald-100">
+                        <div className="flex gap-2">
+                          <Input
+                            type="number"
+                            placeholder="BIOX amount"
+                            step="0.01"
+                            min="0"
+                            value={fundingStates[paper.id]?.amount || ""}
+                            onChange={(e) =>
+                              setFundingStates((prev) => ({
+                                ...prev,
+                                [paper.id]: { ...prev[paper.id], amount: e.target.value },
+                              }))
+                            }
+                            disabled={fundingStates[paper.id]?.isLoading}
+                            className="flex-1 border-emerald-200 focus:border-emerald-400 focus:ring-emerald-400/20 text-sm"
+                          />
+                          <Button
+                            onClick={() => handleFundPaper(paper.id)}
+                            disabled={
+                              fundingStates[paper.id]?.isLoading || 
+                              !fundingStates[paper.id]?.amount ||
+                              Number.parseFloat(fundingStates[paper.id]?.amount || "0") <= 0
+                            }
+                            size="sm"
+                            className="bg-gradient-to-r from-emerald-500 to-green-500 hover:from-emerald-600 hover:to-green-600 text-white border-0 px-6"
+                          >
+                            {fundingStates[paper.id]?.isLoading ? (
+                              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                            ) : (
+                              <>
+                                <Coins className="h-4 w-4 mr-2" />
+                                Fund
+                              </>
+                            )}
+                          </Button>
+                        </div>
+                        
+                        {/* Balance warning */}
+                        {fundingStates[paper.id]?.amount && 
+                         Number.parseFloat(fundingStates[paper.id].amount) > userTokenBalance && (
+                          <p className="text-xs text-red-600">
+                            Insufficient balance. You need {Number.parseFloat(fundingStates[paper.id].amount).toFixed(2)} BIOX but have {userTokenBalance.toFixed(2)} BIOX.
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Voting Section - Only show for published papers */}
+                    {statusKey === 'published' && !votingInfo[paper.id]?.hasVoted && (
+                      <div className="flex gap-2 pt-3 border-t border-emerald-100">
                         <Button
-                          onClick={() => handleFundPaper(paper.id)}
-                          disabled={fundingStates[paper.id]?.isLoading || !fundingStates[paper.id]?.amount}
+                          onClick={() => handleVotePaper(paper.id, true)}
+                          disabled={votingStates[paper.id]?.isLoading}
+                          variant="outline"
                           size="sm"
-                          className="bg-gradient-to-r from-emerald-500 to-green-500 hover:from-emerald-600 hover:to-green-600 text-white border-0"
+                          className="flex-1 border-emerald-200 hover:bg-emerald-50 text-xs"
                         >
-                          {fundingStates[paper.id]?.isLoading ? (
-                            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                          {votingStates[paper.id]?.isLoading ? (
+                            <div className="w-3 h-3 border border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin"></div>
                           ) : (
-                            "Fund"
+                            <>
+                              <ThumbsUp className="h-3 w-3 mr-1" />
+                              Upvote
+                            </>
+                          )}
+                        </Button>
+                        <Button
+                          onClick={() => handleVotePaper(paper.id, false)}
+                          disabled={votingStates[paper.id]?.isLoading}
+                          variant="outline"
+                          size="sm"
+                          className="flex-1 border-slate-200 hover:bg-slate-50 text-xs"
+                        >
+                          {votingStates[paper.id]?.isLoading ? (
+                            <div className="w-3 h-3 border border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div>
+                          ) : (
+                            <>
+                              <ThumbsDown className="h-3 w-3 mr-1" />
+                              Downvote
+                            </>
                           )}
                         </Button>
                       </div>
+                    )}
 
-                      {/* Voting Actions */}
-                      {!votingInfo[paper.id]?.hasVoted && (
-                        <div className="flex gap-2">
-                          <Button
-                            onClick={() => handleVotePaper(paper.id, true)}
-                            disabled={votingStates[paper.id]?.isLoading}
-                            variant="outline"
-                            size="sm"
-                            className="flex-1 border-emerald-200 hover:bg-emerald-50 text-xs"
-                          >
-                            {votingStates[paper.id]?.isLoading ? (
-                              <div className="w-3 h-3 border border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin"></div>
-                            ) : (
-                              <>
-                                <ThumbsUp className="h-3 w-3 mr-1" />
-                                Upvote
-                              </>
-                            )}
-                          </Button>
-                          <Button
-                            onClick={() => handleVotePaper(paper.id, false)}
-                            disabled={votingStates[paper.id]?.isLoading}
-                            variant="outline"
-                            size="sm"
-                            className="flex-1 border-slate-200 hover:bg-slate-50 text-xs"
-                          >
-                            {votingStates[paper.id]?.isLoading ? (
-                              <div className="w-3 h-3 border border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div>
-                            ) : (
-                              <>
-                                <ThumbsDown className="h-3 w-3 mr-1" />
-                                Downvote
-                              </>
-                            )}
-                          </Button>
-                        </div>
-                      )}
-                    </div>
+                    {/* Show voting status if user has voted */}
+                    {votingInfo[paper.id]?.hasVoted && (
+                      <div className="pt-3 border-t border-emerald-100">
+                        <Badge 
+                          variant="outline" 
+                          className={`${
+                            votingInfo[paper.id]?.voteType === 'upvote' 
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-700' 
+                              : 'bg-slate-50 border-slate-200 text-slate-700'
+                          } text-xs`}
+                        >
+                          {votingInfo[paper.id]?.voteType === 'upvote' ? (
+                            <>
+                              <ThumbsUp className="h-3 w-3 mr-1" />
+                              You upvoted this paper
+                            </>
+                          ) : (
+                            <>
+                              <ThumbsDown className="h-3 w-3 mr-1" />
+                              You downvoted this paper
+                            </>
+                          )}
+                        </Badge>
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
               )
