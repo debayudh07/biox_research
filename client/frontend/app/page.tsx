@@ -193,7 +193,7 @@ export default function Home() {
                   Revolutionizing Bio-Medical Research
                 </h2>
                 <p className="max-w-[900px] text-muted-foreground md:text-xl/relaxed lg:text-base/relaxed xl:text-xl/relaxed">
-                  Our platform offers unique advantages that traditional research publishing can't match.
+                  Our platform offers unique advantages that traditional research publishing can&apos;t match.
                 </p>
               </div>
             </div>
@@ -272,7 +272,7 @@ export default function Home() {
                 </p>
                 <p className="text-muted-foreground md:text-xl/relaxed">
                   We believe in a future where research is accessible, transparent, and collaborative. By leveraging
-                  blockchain technology and AI, we're building a platform that eliminates barriers, reduces publication
+                  blockchain technology and AI, we&apos;re building a platform that eliminates barriers, reduces publication
                   bias, and empowers researchers worldwide.
                 </p>
                 <p className="text-muted-foreground md:text-xl/relaxed">

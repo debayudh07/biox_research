@@ -45,7 +45,7 @@ export async function uploadToPinata(file: File): Promise<string> {
     }
 }
 
-export async function uploadJSONToPinata(data: any): Promise<string> {
+export async function uploadJSONToPinata(data: Record<string, unknown>): Promise<string> {
     try {
         const response = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
             method: 'POST',

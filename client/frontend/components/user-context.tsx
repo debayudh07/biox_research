@@ -1,7 +1,6 @@
 "use client"
 
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
-import { PublicKey } from '@solana/web3.js'
 
 type UserContextType = {
   isSignedUp: boolean

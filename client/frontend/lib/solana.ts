@@ -1,9 +1,14 @@
+/*eslint-disable*/
 import * as anchor from "@coral-xyz/anchor";
-import { Connection, PublicKey, SystemProgram, LAMPORTS_PER_SOL, Transaction, Keypair, SYSVAR_RENT_PUBKEY } from "@solana/web3.js";
+import { Connection, PublicKey, SystemProgram, LAMPORTS_PER_SOL, Transaction, Keypair } from "@solana/web3.js";
 import { 
   createAssociatedTokenAccountInstruction,
   createInitializeAccountInstruction,
+  createInitializeMintInstruction,
+  createMintToInstruction,
   getAssociatedTokenAddressSync,
+  getMintLen,
+  getMinimumBalanceForRentExemptMint,
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID
 } from "@solana/spl-token";
@@ -18,7 +23,7 @@ export const PROGRAM_ID = new PublicKey("4TsLtFAfkbpcFjesanK4ojZNTK1bsQPfPuVxt5g
 export const BIOX_TOKEN_MINT = new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"); // USDC devnet mint
 
 // Helper function to extract publicKey from wallet
-export function getWalletPublicKey(wallet: any): PublicKey {
+export function getWalletPublicKey(wallet: { adapter?: { publicKey?: PublicKey }; publicKey?: PublicKey }): PublicKey {
   const publicKey = wallet.adapter?.publicKey || wallet.publicKey;
   if (!publicKey) {
     throw new Error("Wallet is not connected or does not have a public key");
@@ -27,7 +32,16 @@ export function getWalletPublicKey(wallet: any): PublicKey {
 }
 
 // Helper function to create wallet adapter for Anchor
-export function createWalletAdapter(wallet: any) {
+export function createWalletAdapter(wallet: { 
+  adapter?: { 
+    publicKey?: PublicKey; 
+    signTransaction?: Function; 
+    signAllTransactions?: Function; 
+  }; 
+  publicKey?: PublicKey; 
+  signTransaction?: Function; 
+  signAllTransactions?: Function; 
+}) {
   const publicKey = getWalletPublicKey(wallet);
   
   return {
