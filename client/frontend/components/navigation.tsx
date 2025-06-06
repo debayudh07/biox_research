@@ -273,7 +273,7 @@ This signature proves you own this wallet and authorizes account creation.`;
                     />
                   </div>
                   <div className="text-sm text-muted-foreground bg-emerald-50 dark:bg-emerald-900/20 p-3 rounded-md">
-                    <strong>Note:</strong> You'll be asked to sign a message with your wallet to verify ownership and create your account.
+                    <strong>Note:</strong> You&aptos;ll be asked to sign a message with your wallet to verify ownership and create your account.
                   </div>
                 </div>
                 <div className="flex gap-2">

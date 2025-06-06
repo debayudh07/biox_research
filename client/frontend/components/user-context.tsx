@@ -68,7 +68,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
       })
 
       if (response.ok) {
-        const result = await response.json()
+        
         
         // Store user data in localStorage
         localStorage.setItem('userSignedUp', 'true')
