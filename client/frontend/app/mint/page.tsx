@@ -29,7 +29,7 @@ const TOKEN_METADATA = {
   name: "BIOX Token",
   symbol: "BIOX",
   description: "BIOX Token - A revolutionary biotechnology token for the future of healthcare and life sciences",
-  image: "https://via.placeholder.com/200x200/4F46E5/FFFFFF?text=BIOX",
+  image: "./biox.png",
   decimals: 9,
   website: "https://biox-token.com",
   twitter: "https://twitter.com/biox_token"
