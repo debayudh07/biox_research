@@ -19,9 +19,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Loader2, Coins, CheckCircle, AlertCircle, Wallet, Copy, ExternalLink } from "lucide-react";
+import { Loader2, Coins, CheckCircle, AlertCircle, Wallet, Copy, ExternalLink, Plus, Minus } from "lucide-react";
 import { useUser } from "@/components/user-context";
 import { setCurrentTokenMint, getUserTokenBalance } from "@/lib/solana";
+import { Navigation } from "@/components/navigation";
 
 // Token metadata for BIOX Token
 const TOKEN_METADATA = {
@@ -42,6 +43,7 @@ export default function MintTokensPage() {
   const { connection } = useConnection();
   const { isSignedUp } = useUser();
   const [mintAmount, setMintAmount] = useState("100");
+  const [quickMintAmount, setQuickMintAmount] = useState(10); // New state for quick mint in 10's
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [customMintAddress, setCustomMintAddress] = useState(PREDEFINED_BIOX_MINT);
@@ -54,7 +56,7 @@ export default function MintTokensPage() {
   const [tokenMint, setTokenMint] = useState(PREDEFINED_BIOX_MINT);
   const [tokenAccount, setTokenAccount] = useState("");
   const [balance, setBalance] = useState("");
-  const [operationType, setOperationType] = useState<"create-mint" | "mint-tokens" | "use-existing">("use-existing");
+  const [operationType, setOperationType] = useState<"create-mint" | "mint-tokens" | "use-existing" | "quick-mint">("use-existing");
   const [isCheckingBalance, setIsCheckingBalance] = useState(false);
 
   // Check wallet capabilities
@@ -150,6 +152,105 @@ export default function MintTokensPage() {
       setBalance("0");
     } finally {
       setIsCheckingBalance(false);
+    }
+  };
+
+  // New Quick Mint Function in 10's
+  const quickMintBioxTokens = async (amount: number) => {
+    if (!connection || !publicKey || !signTransaction) {
+      setMessage({ type: "error", text: "Please connect your wallet first" });
+      return;
+    }
+
+    if (amount <= 0 || amount % 10 !== 0) {
+      setMessage({ type: "error", text: "Amount must be a positive multiple of 10" });
+      return;
+    }
+
+    const mintAddress = new PublicKey(PREDEFINED_BIOX_MINT);
+
+    try {
+      setIsLoading(true);
+      setMessage(null);
+
+      // Get or create associated token account
+      const associatedTokenAddress = await getAssociatedTokenAddress(
+        mintAddress,
+        publicKey
+      );
+
+      // Check if account exists, create if not
+      const accountInfo = await connection.getAccountInfo(associatedTokenAddress);
+      
+      if (!accountInfo) {
+        const createATATransaction = new Transaction().add(
+          createAssociatedTokenAccountInstruction(
+            publicKey,
+            associatedTokenAddress,
+            publicKey,
+            mintAddress
+          )
+        );
+
+        const { blockhash: ataBlockhash } = await connection.getLatestBlockhash();
+        createATATransaction.recentBlockhash = ataBlockhash;
+        createATATransaction.feePayer = publicKey;
+
+        const signedATATransaction = await signTransaction(createATATransaction);
+        const ataSignature = await connection.sendRawTransaction(signedATATransaction.serialize());
+        await connection.confirmTransaction(ataSignature);
+        
+        setTokenAccount(associatedTokenAddress.toString());
+      }
+
+      // Create mint transaction
+      const transaction = new Transaction().add(
+        createMintToInstruction(
+          mintAddress, // mint
+          associatedTokenAddress, // destination
+          publicKey, // authority
+          amount * Math.pow(10, TOKEN_METADATA.decimals) // amount
+        )
+      );
+
+      // Get recent blockhash
+      const { blockhash } = await connection.getLatestBlockhash();
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = publicKey;
+
+      // Sign and send transaction
+      const signedTransaction = await signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTransaction.serialize());
+      await connection.confirmTransaction(signature);
+
+      setMessage({
+        type: "success",
+        text: `Successfully minted ${amount.toLocaleString()} BIOX tokens! Transaction: ${signature.slice(0, 20)}...`
+      });
+      
+      // Update balance
+      await checkBalance();
+
+    } catch (error) {
+      console.error("Error minting tokens:", error);
+      
+      let errorMessage = "An unexpected error occurred";
+      if (error instanceof Error) {
+        if (error.message.includes("this.emit")) {
+          errorMessage = "Wallet connection error. Please disconnect and reconnect your wallet.";
+        } else if (error.message.includes("unauthorized") || error.message.includes("authority")) {
+          errorMessage = "You don't have mint authority for this token. Only the token creator can mint new tokens.";
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
+      setMessage({
+        type: "error",
+        text: errorMessage
+      });
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -497,12 +598,23 @@ export default function MintTokensPage() {
       await mintBioxTokens();
     } else if (operationType === "use-existing") {
       await setupExistingBioxToken();
+    } else if (operationType === "quick-mint") {
+      await quickMintBioxTokens(quickMintAmount);
     }
   };
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     setMessage({ type: "success", text: "Copied to clipboard!" });
+  };
+
+  // Quick mint amount controls
+  const increaseQuickMintAmount = () => {
+    setQuickMintAmount(prev => prev + 10);
+  };
+
+  const decreaseQuickMintAmount = () => {
+    setQuickMintAmount(prev => Math.max(10, prev - 10));
   };
 
   if (!connected) {
@@ -568,6 +680,7 @@ export default function MintTokensPage() {
 
   return (
     <div className="container mx-auto py-8">
+      <Navigation />
       <div className="max-w-2xl mx-auto space-y-6">
         {/* Wallet Compatibility Info */}
         {walletCapabilities && (
@@ -603,6 +716,89 @@ export default function MintTokensPage() {
             </CardContent>
           </Card>
         )}
+
+        {/* Quick Mint Card */}
+        <Card className="border-blue-200">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-blue-700">
+              <Coins className="h-5 w-5" />
+              Quick Mint BIOX Tokens
+            </CardTitle>
+            <CardDescription>
+              Mint BIOX tokens in multiples of 10 with one click
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="bg-blue-50 p-4 rounded-lg">
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-sm font-medium">Amount to mint:</span>
+                <div className="flex items-center gap-3">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={decreaseQuickMintAmount}
+                    disabled={quickMintAmount <= 10 || isLoading}
+                    className="h-8 w-8 p-0"
+                  >
+                    <Minus className="h-4 w-4" />
+                  </Button>
+                  <span className="font-bold text-lg text-blue-700 min-w-[60px] text-center">
+                    {quickMintAmount}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={increaseQuickMintAmount}
+                    disabled={isLoading}
+                    className="h-8 w-8 p-0"
+                  >
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-4 gap-2">
+                {[10, 50, 100, 500].map((amount) => (
+                  <Button
+                    key={amount}
+                    variant={quickMintAmount === amount ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setQuickMintAmount(amount)}
+                    disabled={isLoading}
+                    className="text-xs"
+                  >
+                    {amount}
+                  </Button>
+                ))}
+              </div>
+            </div>
+
+            <Button
+              onClick={() => quickMintBioxTokens(quickMintAmount)}
+              disabled={isLoading || (!walletCapabilities?.canSign && !walletCapabilities?.canSend)}
+              className="w-full bg-blue-600 hover:bg-blue-700"
+            >
+              {isLoading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Minting...
+                </>
+              ) : (
+                <>
+                  <Coins className="mr-2 h-4 w-4" />
+                  Quick Mint {quickMintAmount} BIOX Tokens
+                </>
+              )}
+            </Button>
+
+            <Alert>
+              <CheckCircle className="h-4 w-4" />
+              <AlertDescription>
+                Quick mint allows you to mint BIOX tokens in predefined amounts. Only works if you have mint authority for the token.
+              </AlertDescription>
+            </Alert>
+          </CardContent>
+        </Card>
 
         {/* BIOX Token Info Card */}
         <Card className="border-emerald-200">
@@ -774,7 +970,7 @@ export default function MintTokensPage() {
                     className="rounded"
                   />
                   <Label htmlFor="mint-tokens" className="font-normal">
-                    Mint Tokens (Requires Mint Authority)
+                    Custom Amount Mint (Requires Mint Authority)
                   </Label>
                 </div>
               </div>
@@ -889,7 +1085,16 @@ export default function MintTokensPage() {
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <div className="w-6 h-6 bg-emerald-500 text-white rounded-full flex items-center justify-center text-sm font-bold">2</div>
+                <div className="w-6 h-6 bg-blue-500 text-white rounded-full flex items-center justify-center text-sm font-bold">2</div>
+                <div>
+                  <h4 className="font-medium">Use Quick Mint for fast token creation</h4>
+                  <p className="text-sm text-muted-foreground">
+                    Use the Quick Mint feature above to mint tokens in multiples of 10 with preset amounts.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
+                <div className="w-6 h-6 bg-emerald-500 text-white rounded-full flex items-center justify-center text-sm font-bold">3</div>
                 <div>
                   <h4 className="font-medium">Request tokens from team or faucet</h4>
                   <p className="text-sm text-muted-foreground">
@@ -898,7 +1103,7 @@ export default function MintTokensPage() {
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <div className="w-6 h-6 bg-emerald-500 text-white rounded-full flex items-center justify-center text-sm font-bold">3</div>
+                <div className="w-6 h-6 bg-emerald-500 text-white rounded-full flex items-center justify-center text-sm font-bold">4</div>
                 <div>
                   <h4 className="font-medium">Start funding research</h4>
                   <p className="text-sm text-muted-foreground">
